@@ -99,6 +99,12 @@ export function Settings() {
         <Row title="Продолжать с того же места" hint="После перезапуска очередь и позиция трека сохраняются">
           <Toggle checked={s.resume} onChange={(v) => s.set({ resume: v })} label={t("Продолжать с того же места")} />
         </Row>
+        <Row title="Предел громкости" hint="Сколько громкости даёт ползунок внизу на 100%. Уменьшите, если даже на малых значениях слишком громко — ползунок станет точнее">
+          <div className="row-gap">
+            <Range value={s.volumeMax} min={0.05} max={1} step={0.01} onChange={(v) => s.set({ volumeMax: v })} />
+            <span className="set-val">{Math.round(s.volumeMax * 100)}%</span>
+          </div>
+        </Row>
         <Row title="Скорость воспроизведения">
           <div className="segmented">
             {[0.75, 1, 1.25, 1.5].map((v) => (

@@ -88,8 +88,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   skipRef.current = settings.skipUnavailable;
   const resumeKey = useRef<string | null>(null);
   const fadeTimer = useRef<number | undefined>(undefined);
-  const volRef = useRef(volume);
-  volRef.current = volume;
+  // Предел громкости из настроек: ползунок 0–100% даёт 0–volumeMax реальной громкости
+  const volMax = Math.min(1, Math.max(0.05, settings.volumeMax ?? 1));
+  const volRef = useRef(volume * volMax);
+  volRef.current = volume * volMax;
   const loadSeq = useRef(0);
   const retried = useRef(false);
   const playingTrack = useRef<Track | null>(null);
@@ -193,7 +195,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   // События <audio>
   useEffect(() => {
     const el = audio.current;
-    el.volume = volume;
+    el.volume = volRef.current;
     const on = (ev: string, fn: () => void) => el.addEventListener(ev, fn);
     const handlers: [string, () => void][] = [
       ["play", () => setPlaying(true)],
@@ -229,7 +231,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [next, toast, load]);
 
-  useEffect(() => { audio.current.volume = volume; localStorage.setItem("melo.volume", JSON.stringify(volume)); }, [volume]);
+  useEffect(() => { audio.current.volume = volume * volMax; localStorage.setItem("melo.volume", JSON.stringify(volume)); }, [volume, volMax]);
   useEffect(() => localStorage.setItem("melo.shuffle", JSON.stringify(shuffle)), [shuffle]);
   useEffect(() => localStorage.setItem("melo.repeat", JSON.stringify(repeat)), [repeat]);
 

@@ -3,6 +3,8 @@ export type Lang = "ru" | "en";
 // Ключ — русская строка, значение — английский перевод.
 // Параметры подставляются как {name}.
 const en: Record<string, string> = {
+  "Предел громкости": "Volume limit",
+  "Сколько громкости даёт ползунок внизу на 100%. Уменьшите, если даже на малых значениях слишком громко — ползунок станет точнее": "How loud the volume slider at the bottom is at 100%. Lower it if even small values are too loud — the slider becomes more precise",
   // Аккаунт Melo
   "Логин и пароль": "Username and password",
   "Вход": "Sign in",

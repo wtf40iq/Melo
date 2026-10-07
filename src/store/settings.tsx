@@ -18,6 +18,8 @@ type Settings = {
   /** Плавная пауза и старт */
   fade: boolean;
   speed: number;
+  /** Предел громкости: сколько даёт ползунок громкости на 100%, 0.05–1 */
+  volumeMax: number;
   closeToTray: boolean;
   animations: "full" | "reduced" | "off";
   compact: boolean;
@@ -67,6 +69,7 @@ const defaults: Settings = {
   resume: true,
   fade: true,
   speed: 1,
+  volumeMax: 1,
   closeToTray: false,
   animations: "full",
   compact: false,
