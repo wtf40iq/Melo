@@ -1,0 +1,50 @@
+# Сборка Melo для Windows и публикация релиза.
+# Запуск: поднять версию и запушить тег, например `git tag v0.9.1 && git push --tags`.
+# Приложение у пользователей само увидит новый релиз и предложит обновиться.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Сборка
+        run: npx tauri build --no-bundle
+
+      - name: Упаковка
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Copy-Item src-tauri/target/release/melo.exe out/Melo.exe
+          Compress-Archive -Path out/Melo.exe -DestinationPath "out/Melo-windows-${{ github.ref_name }}.zip"
+
+      - name: Релиз на GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Melo ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            out/Melo.exe
+            out/Melo-windows-${{ github.ref_name }}.zip
