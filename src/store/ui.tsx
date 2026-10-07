@@ -24,6 +24,8 @@ type UiState = {
   setQuery: (q: string) => void;
   queueOpen: boolean;
   setQueueOpen: (v: boolean) => void;
+  lyricsOpen: boolean;
+  setLyricsOpen: (v: boolean) => void;
   toast: (text: string, params?: ToastParams, opts?: ToastOptions) => void;
   dismissToast: (id: number) => void;
   toasts: Toast[];
@@ -37,7 +39,11 @@ export function UiProvider({ children }: { children: ReactNode }) {
   const [history, setHistory] = useState<Route[]>([{ name: "home" }]);
   const [pos, setPos] = useState(0);
   const [query, setQuery] = useState("");
-  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueOpen, setQueueOpenRaw] = useState(false);
+  const [lyricsOpen, setLyricsOpenRaw] = useState(false);
+  // Очередь и текст песни открываются на одном месте справа — одно закрывает другое
+  const setQueueOpen = useCallback((v: boolean) => { setQueueOpenRaw(v); if (v) setLyricsOpenRaw(false); }, []);
+  const setLyricsOpen = useCallback((v: boolean) => { setLyricsOpenRaw(v); if (v) setQueueOpenRaw(false); }, []);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
 
@@ -66,6 +72,8 @@ export function UiProvider({ children }: { children: ReactNode }) {
     setQuery,
     queueOpen,
     setQueueOpen,
+    lyricsOpen,
+    setLyricsOpen,
     toast,
     dismissToast,
     toasts,

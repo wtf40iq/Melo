@@ -5,13 +5,14 @@ import { useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { useLibrary } from "../store/library";
 import { usePlayer } from "../store/player";
-import { useUi } from "../store/ui";
+import { errorText, useUi } from "../store/ui";
 import { formatTime } from "../types";
 import { Cover } from "./Cover";
 import { Visualizer } from "./Visualizer";
 import { useSettings } from "../store/settings";
 import { useT } from "../store/settings";
-import { SlidersHorizontal } from "lucide-react";
+import { Mic2, Radio, SlidersHorizontal } from "lucide-react";
+import { api } from "../api";
 
 function Slider({ value, max, onChange, label }: { value: number; max: number; onChange: (v: number) => void; label: string }) {
   const pct = max ? Math.min(100, (value / max) * 100) : 0;
@@ -29,6 +30,23 @@ export function PlayerBar() {
   const lib = useLibrary();
   const ui = useUi();
   const lastVol = useRef(0.7);
+  const [similarBusy, setSimilarBusy] = useState(false);
+  // Похожее: текущий трек доигрывает, дальше в очереди — похожие
+  const playSimilar = async () => {
+    const cur = p.current;
+    if (!cur || similarBusy) return;
+    setSimilarBusy(true);
+    try {
+      const list = await api.similar(cur);
+      if (!list.length) return ui.toast("Похожих треков не нашлось");
+      p.replaceUpcoming(list);
+      ui.toast("Дальше — похожее на «{name}»", { name: cur.title }, { action: { label: "Очередь", run: () => ui.setQueueOpen(true) } });
+    } catch (e) {
+      ui.toast(errorText(e));
+    } finally {
+      setSimilarBusy(false);
+    }
+  };
   const [volDrag, setVolDrag] = useState(false);
   const [volFlash, setVolFlash] = useState(false);
   const volTimer = useRef(0);
@@ -130,6 +148,21 @@ export function PlayerBar() {
       </div>
 
       <div className="extras">
+        {t && (
+          <>
+            <button
+              className={`icon-btn ${ui.lyricsOpen ? "on" : ""}`}
+              onClick={() => ui.setLyricsOpen(!ui.lyricsOpen)}
+              aria-label={tr("Текст песни")}
+              data-tip={tr("Текст песни")}
+            >
+              <Mic2 size={18} />
+            </button>
+            <button className={`icon-btn ${similarBusy ? "busy" : ""}`} onClick={playSimilar} aria-label={tr("Слушать похожее")} data-tip={tr("Слушать похожее")}>
+              {similarBusy ? <Loader2 size={18} className="spin" /> : <Radio size={18} />}
+            </button>
+          </>
+        )}
         <button
           className={`icon-btn ${ui.route.name === "settings" ? "on" : ""}`}
           onClick={() => ui.navigate({ name: "settings" })}

@@ -12,6 +12,8 @@ type Props = {
   showAlbum?: boolean;
   /** Если задано — строки можно перетаскивать мышкой. */
   onMove?: (from: number, to: number) => void;
+  /** Если задано — в меню трека есть «Удалить из плейлиста». */
+  onRemove?: (t: Track, index: number) => void;
 };
 
 /** Сколько строк рисуем сверх видимых сверху и снизу. */
@@ -94,13 +96,13 @@ const Row = memo(function Row({ t, i, current, playing, liked, showAlbum, sortab
   );
 });
 
-export function TrackList({ tracks, showAlbum = true, onMove }: Props) {
+export function TrackList({ tracks, showAlbum = true, onMove, onRemove }: Props) {
   const p = usePlayer();
   const lib = useLibrary();
   const s = useSettings();
   const tr = s.t;
   const rowH = s.compact ? 44 : 56;
-  const [menu, setMenu] = useState<{ track: Track; x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ track: Track; i: number; x: number; y: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState<[number, number]>([0, 40]);
@@ -254,7 +256,7 @@ export function TrackList({ tracks, showAlbum = true, onMove }: Props) {
       p.playTrack(tracks[i], tracks);
     },
     like: (i) => live.current.lib.toggleMine(live.current.tracks[i]),
-    menu: (i, x, y) => setMenu({ track: live.current.tracks[i], x, y }),
+    menu: (i, x, y) => setMenu({ track: live.current.tracks[i], i, x, y }),
   }), [press]);
 
   const [a, b] = range;
@@ -284,7 +286,7 @@ export function TrackList({ tracks, showAlbum = true, onMove }: Props) {
       <div ref={bodyRef} className="tl-body" style={{ height: tracks.length * rowH }}>
         {rows}
       </div>
-      {menu && <TrackMenu {...menu} onClose={() => setMenu(null)} />}
+      {menu && <TrackMenu track={menu.track} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onRemove={onRemove ? () => onRemove(menu.track, menu.i) : undefined} />}
     </div>
   );
 }

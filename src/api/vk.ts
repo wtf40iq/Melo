@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Account, AppInfo, MusicApi, QrCode, QrStatus } from "./types";
-import { Playlist, Profile, Track } from "../types";
+import { Lyrics, Playlist, Profile, Track } from "../types";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const lang = () => {
@@ -25,7 +25,21 @@ const mapTrack = (a: any): Track => ({
   duration: a.duration,
   explicit: !!a.is_explicit,
   url: a.url && !a.url.includes("audio_api_unavailable") ? a.url : undefined,
+  hasLyrics: !!(a.has_lyrics || a.lyrics_id),
+  lyricsId: a.lyrics_id,
 });
+
+/** Разбирает ответ audio.getLyrics (новый формат с таймкодами и старый — просто текст). */
+const parseLyrics = (r: any): Lyrics | null => {
+  const l = r?.lyrics ?? r;
+  const ts = l?.timestamps;
+  if (Array.isArray(ts) && ts.length) {
+    return { synced: true, lines: ts.map((x: any) => ({ time: (x.begin ?? 0) / 1000, text: String(x.line ?? "") })) };
+  }
+  const text = Array.isArray(l?.text) ? l.text.join("\n") : typeof l?.text === "string" ? l.text : "";
+  if (!text.trim()) return null;
+  return { synced: false, lines: text.split(/\r?\n/).map((line: string) => ({ text: line })) };
+};
 
 const mapPlaylist = (p: any, myId?: number): Playlist => ({
   id: `${p.owner_id}_${p.id}`,
@@ -165,6 +179,40 @@ export const vkApi: MusicApi = {
   async createPlaylist(title) {
     const p = await call("audio.createPlaylist", { owner_id: me?.id, title });
     return mapPlaylist({ ...p, count: 0 }, me?.id);
+  },
+
+  async deletePlaylist(pl) {
+    await call("audio.deletePlaylist", { owner_id: pl.ownerId, playlist_id: pl.playlistId });
+  },
+
+  async renamePlaylist(pl, title) {
+    await call("audio.editPlaylist", { owner_id: pl.ownerId, playlist_id: pl.playlistId, title });
+  },
+
+  async removeFromPlaylist(t, pl) {
+    await call("audio.removeFromPlaylist", { owner_id: pl.ownerId, playlist_id: pl.playlistId, audio_ids: `${t.ownerId}_${t.audioId}` });
+  },
+
+  async lyrics(t) {
+    try {
+      const r = parseLyrics(await call("audio.getLyrics", { audio_id: `${t.ownerId}_${t.audioId}` }));
+      if (r) return r;
+    } catch {
+      /* старые версии API — пробуем по lyrics_id */
+    }
+    if (t.lyricsId) {
+      try {
+        return parseLyrics(await call("audio.getLyrics", { lyrics_id: t.lyricsId }));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  },
+
+  async similar(t) {
+    const r = await call("audio.getRecommendations", { target_audio: `${t.ownerId}_${t.audioId}`, count: 60 });
+    return items(r).map(mapTrack).filter((x: Track) => x.id !== t.id);
   },
 
   async reorder(t, after, before) {

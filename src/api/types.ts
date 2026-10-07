@@ -1,4 +1,4 @@
-import { Page, Playlist, Profile, Track } from "../types";
+import { Lyrics, Page, Playlist, Profile, Track } from "../types";
 
 export type QrCode = { url: string; hash: string; expires_at: number };
 export type QrStatus = {
@@ -35,6 +35,13 @@ export interface MusicApi {
   undoRemove(t: Track): Promise<void>;
   addToPlaylist(t: Track, pl: Playlist): Promise<void>;
   createPlaylist(title: string): Promise<Playlist>;
+  deletePlaylist(pl: Playlist): Promise<void>;
+  renamePlaylist(pl: Playlist, title: string): Promise<void>;
+  removeFromPlaylist(t: Track, pl: Playlist): Promise<void>;
+  /** Текст песни; null — текста нет. */
+  lyrics(t: Track): Promise<Lyrics | null>;
+  /** Похожие треки. */
+  similar(t: Track): Promise<Track[]>;
   /** Переставить трек в «Моей музыке»: соседи после перестановки. */
   reorder(t: Track, after?: Track, before?: Track): Promise<void>;
   accounts(): Promise<Account[]>;

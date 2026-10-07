@@ -1,6 +1,8 @@
 import { Logo } from "../components/Logo";
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, Globe, KeyRound, Loader2, RefreshCw, Smartphone } from "lucide-react";
+import { ArrowLeft, Check, Globe, KeyRound, Loader2, Lock, RefreshCw, Smartphone } from "lucide-react";
+import { acceptTerms, termsAccepted } from "../legal";
+import { LegalDialog } from "../components/LegalDialog";
 import { createQR } from "@vkontakte/vk-qr";
 import { api } from "../api";
 import { QrCode } from "../api/types";
@@ -26,6 +28,9 @@ export function Login() {
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
   const done = useRef(false);
+  const [agreed, setAgreed] = useState(termsAccepted);
+  const [doc, setDoc] = useState<"terms" | "privacy" | null>(null);
+  const agree = (v: boolean) => { setAgreed(v); acceptTerms(v); };
 
   const finish = async () => {
     if (done.current) return;
@@ -36,6 +41,7 @@ export function Login() {
 
   // Получаем QR-код и опрашиваем ВК, пока вход не подтвердят
   useEffect(() => {
+    if (!agreed) return;
     let alive = true;
     let timer: number | undefined;
     setPhase("loading");
@@ -93,7 +99,7 @@ export function Login() {
       clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [attempt]);
+  }, [attempt, agreed]);
 
   const submitOtp = async (value: string) => {
     if (!code || value.length < CODE_LEN || sending) return;
@@ -161,19 +167,36 @@ export function Login() {
           <div className="login-or"><span>{t("или")}</span></div>
           <button
             className="btn secondary wide"
-            disabled={busy || lib.booting}
+            disabled={busy || lib.booting || !agreed}
             onClick={async () => { setBusy(true); await lib.login(); setBusy(false); }}
           >
             {busy ? <Loader2 size={18} className="spin" /> : <Globe size={18} />}
             {t(busy ? "Ждём вход в окне ВК…" : "Войти по логину и паролю")}
           </button>
+          <label className={`terms-check ${agreed ? "on" : ""}`}>
+            <input type="checkbox" checked={agreed} onChange={(e) => agree(e.target.checked)} />
+            <span className="terms-box">{agreed && <Check size={13} strokeWidth={3} />}</span>
+            <span>
+              {t("Я принимаю")}{" "}
+              <button type="button" className="link-inline" onClick={(e) => { e.preventDefault(); setDoc("terms"); }}>{t("пользовательское соглашение")}</button>{" "}
+              {t("и")}{" "}
+              <button type="button" className="link-inline" onClick={(e) => { e.preventDefault(); setDoc("privacy"); }}>{t("политику конфиденциальности")}</button>
+            </span>
+          </label>
+          {doc && <LegalDialog doc={doc} onClose={() => setDoc(null)} />}
           <small>
             {t(api.demo ? "Сейчас открыт демо-режим: данные ненастоящие." : "Вход идёт на официальной странице ВК. Пароль приложение не видит.")}
           </small>
         </div>
 
         <div className="qr-box">
-          {phase === "code" && (
+          {!agreed && (
+            <div className="qr-placeholder locked">
+              <Lock size={26} />
+              <span>{t("Примите соглашение слева, чтобы появился QR-код")}</span>
+            </div>
+          )}
+          {agreed && phase === "code" && (
             <form className="code-card" onSubmit={onFormSubmit}>
               <span className="code-icon"><KeyRound size={22} /></span>
               <b>{t("Введите код с телефона")}</b>
@@ -203,7 +226,7 @@ export function Login() {
             </form>
           )}
 
-          {(phase === "waiting" || phase === "scanned" || phase === "expired") && code && (
+          {agreed && (phase === "waiting" || phase === "scanned" || phase === "expired") && code && (
             <div className="qr-wrap">
               <div
                 className={`qr ${phase !== "waiting" ? "dim" : ""}`}
@@ -217,16 +240,16 @@ export function Login() {
               )}
             </div>
           )}
-          {(phase === "loading" || phase === "done") && <div className="qr-placeholder"><Loader2 size={28} className="spin" /></div>}
-          {phase === "error" && (
+          {agreed && (phase === "loading" || phase === "done") && <div className="qr-placeholder"><Loader2 size={28} className="spin" /></div>}
+          {agreed && phase === "error" && (
             <div className="qr-placeholder error">
               <span>{t(error)}</span>
               <button className="btn secondary" onClick={() => setAttempt((a) => a + 1)}><RefreshCw size={16} /> {t("Повторить")}</button>
             </div>
           )}
 
-          {phase === "done" && <small className="qr-caption">{t("Входим…")}</small>}
-          {(phase === "waiting" || phase === "scanned") && (
+          {agreed && phase === "done" && <small className="qr-caption">{t("Входим…")}</small>}
+          {agreed && (phase === "waiting" || phase === "scanned") && (
             <button type="button" className="link-btn" onClick={() => { setOtp(""); setOtpError(""); setPhase("code"); }}>
               {t("Телефон показал код?")}
             </button>

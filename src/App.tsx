@@ -6,6 +6,7 @@ import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { PlayerBar } from "./components/PlayerBar";
 import { QueuePanel } from "./components/QueuePanel";
+import { LyricsPanel } from "./components/LyricsPanel";
 import { Toasts } from "./components/Toasts";
 import { Tooltip } from "./components/Tooltip";
 import { Effects } from "./components/Effects";
@@ -148,6 +149,7 @@ function Shell() {
         </div>
       </main>
       <QueuePanel />
+      <LyricsPanel />
       <PlayerBar />
       <Toasts />
       <Tooltip />

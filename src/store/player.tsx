@@ -31,6 +31,8 @@ type PlayerState = {
   cycleRepeat: () => void;
   playNext: (t: Track) => void;
   enqueue: (t: Track) => void;
+  /** Заменить всё, что играет после текущего трека. */
+  replaceUpcoming: (tracks: Track[]) => void;
   removeAt: (i: number) => void;
   stop: () => void;
   /** Восстановить очередь и позицию, сохранённые для этого аккаунта. */
@@ -368,6 +370,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (!current) return startList([t], 0);
       setQueue((q) => [...q.slice(0, index + 1), t, ...q.slice(index + 1)]);
       toast("Сыграет следующим");
+    },
+    replaceUpcoming: (list) => {
+      if (!current) return startList(list, 0);
+      const q = [...state.current.queue.slice(0, index + 1), ...list.filter((x) => x.id !== current.id)];
+      original.current = q;
+      state.current.queue = q;
+      setQueue(q);
     },
     enqueue: (t) => {
       if (!current) return startList([t], 0);

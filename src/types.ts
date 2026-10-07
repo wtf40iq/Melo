@@ -10,6 +10,9 @@ export type Track = {
   duration: number;
   explicit?: boolean;
   url?: string;
+  /** У трека есть текст в ВК */
+  hasLyrics?: boolean;
+  lyricsId?: number;
 };
 
 export type Playlist = {
@@ -35,3 +38,5 @@ export const formatTime = (sec: number) => {
 
 /** Ключ для сравнения одинаковых треков с разными id (копии в «Моей музыке»). */
 export const trackKey = (t: Track) => `${t.artist}|${t.title}`.toLowerCase().replace(/\s+/g, " ").trim();
+
+export type Lyrics = { synced: boolean; lines: { time?: number; text: string }[] };

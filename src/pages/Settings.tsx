@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Copy, RefreshCw, Sparkles, LogOut, RotateCcw, UserPlus, X } from "lucide-react";
+import { Check, Copy, FileText, RefreshCw, Sparkles, LogOut, RotateCcw, UserPlus, X } from "lucide-react";
 import { api } from "../api";
 import { AppInfo } from "../api/types";
 import { useUi } from "../store/ui";
@@ -8,6 +8,7 @@ import { EQ_BANDS, EQ_PRESETS } from "../store/eq";
 import { useLibrary } from "../store/library";
 import { ACCENTS, useSettings } from "../store/settings";
 import { useUpdate } from "../store/update";
+import { LegalDialog } from "../components/LegalDialog";
 
 const freqLabel = (f: number) => (f >= 1000 ? `${f / 1000}k` : String(f));
 
@@ -60,6 +61,7 @@ export function Settings() {
   const lib = useLibrary();
   const ui = useUi();
   const upd = useUpdate();
+  const [doc, setDoc] = useState<"terms" | "privacy" | null>(null);
   const t = s.t;
   const [info, setInfo] = useState<AppInfo | null>(null);
   useEffect(() => {
@@ -328,6 +330,10 @@ export function Settings() {
         <small className="faint">
           {t("Ключи входа хранятся только на этом компьютере, в папке данных. Melo не собирает статистику и не отправляет ничего, кроме запросов к ВКонтакте.")}
         </small>
+        <button className="btn secondary sm-btn self-start" onClick={() => setDoc("terms")}>
+          <FileText size={15} /> {t("Соглашение и конфиденциальность")}
+        </button>
+        {doc && <LegalDialog doc={doc} onClose={() => setDoc(null)} />}
         <button className="btn secondary sm-btn self-start" onClick={() => window.dispatchEvent(new Event("melo:welcome"))}>
           <Sparkles size={15} /> {t("Показать приветствие")}
         </button>

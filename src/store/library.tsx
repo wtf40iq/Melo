@@ -21,6 +21,8 @@ type LibraryState = {
   isMine: (t: Track) => boolean;
   toggleMine: (t: Track) => Promise<void>;
   createPlaylist: (title: string) => Promise<Playlist | null>;
+  deletePlaylist: (pl: Playlist) => Promise<boolean>;
+  renamePlaylist: (pl: Playlist, title: string) => Promise<boolean>;
   /** Перенести трек в «Моей музыке» с позиции from на позицию to (навсегда, через ВК). */
   moveTrack: (from: number, to: number) => Promise<void>;
   accounts: Account[];
@@ -242,6 +244,26 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       } catch (e) {
         fail(e);
         return null;
+      }
+    },
+    deletePlaylist: async (pl) => {
+      try {
+        await api.deletePlaylist(pl);
+        setPlaylists((prev) => prev.filter((x) => x.id !== pl.id));
+        return true;
+      } catch (e) {
+        fail(e);
+        return false;
+      }
+    },
+    renamePlaylist: async (pl, title) => {
+      try {
+        await api.renamePlaylist(pl, title);
+        setPlaylists((prev) => prev.map((x) => (x.id === pl.id ? { ...x, title } : x)));
+        return true;
+      } catch (e) {
+        fail(e);
+        return false;
       }
     },
   };

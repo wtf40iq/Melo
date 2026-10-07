@@ -80,6 +80,23 @@ export const demoApi: MusicApi = {
     pls.unshift(p);
     return wait(p);
   },
+  deletePlaylist: async (pl) => {
+    const i = pls.findIndex((x) => x.id === pl.id);
+    if (i >= 0) pls.splice(i, 1);
+    return wait(undefined);
+  },
+  renamePlaylist: async (pl, title) => {
+    const x = pls.find((y) => y.id === pl.id);
+    if (x) x.title = title;
+    return wait(undefined);
+  },
+  removeFromPlaylist: () => wait(undefined),
+  lyrics: async (tr) =>
+    wait(tr.title.length % 3 === 0 ? null : {
+      synced: true,
+      lines: ["Ночь опять зовёт меня", "Город в огнях, и я один", "", "Этот трек — просто демо", "Тут будет настоящий текст", "Из ВКонтакте, строка за строкой", "", "И подсветка в такт музыке"].map((text, i) => ({ time: 2 + i * 4, text })),
+    }),
+  similar: (tr) => wait(all().filter((x) => x.id !== tr.id).sort(() => Math.random() - 0.5).slice(0, 10)),
   reorder: () => wait(undefined),
   accounts: () => wait([{ user_id: 1, name: "skymywex", active: true }, { user_id: 2, name: "Второй аккаунт", active: false }]),
   switchAccount: () => wait(undefined),
