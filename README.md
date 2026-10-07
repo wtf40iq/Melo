@@ -1,21 +1,121 @@
-# Melo - музыка без ограничений.
+<div align="center">
 
-Красивое и понятное приложение для прослушивания музыки **прямиком** из ВКонтакте для Windows. 
+<img src="public/melo.svg" width="112" alt="Melo" />
 
-**Бесплатно, без рекламы, без сбора данных.** Melo использует ваш аккаунт только для получения списка музыки и плейлистов. Ключ входа хранится только на вашем компьютере, пароль никуда не утекает.
+# Melo
 
-## Скачать
+**Музыка из ВКонтакте — красиво, быстро и без рекламы.**
 
-Последняя версия — на странице [Releases](https://github.com/wtf40iq/Melo/releases/latest): файл `Melo.exe`. Установка не нужна — просто запустите.
+Современный десктопный плеер для Windows. Бесплатно, с открытым кодом, без сбора данных.
 
-Melo сам проверяет обновления и предлагает поставить новую версию в один клик (отключается в «Настройки → О приложении»).
+[![Release](https://img.shields.io/github/v/release/wtf40iq/Melo?style=for-the-badge&color=8b5cf6&label=версия)](https://github.com/wtf40iq/Melo/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/wtf40iq/Melo/total?style=for-the-badge&color=ec4899&label=загрузки)](https://github.com/wtf40iq/Melo/releases)
+[![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/wtf40iq/Melo/releases/latest)
+[![Stars](https://img.shields.io/github/stars/wtf40iq/Melo?style=for-the-badge&color=f59e0b&label=звёзды)](https://github.com/wtf40iq/Melo/stargazers)
 
-## Возможности
+<br />
 
-- Вход по QR-коду из приложения ВК или через официальную страницу ВК, несколько аккаунтов
-- Моя музыка, плейлисты, «Моя волна», обзор, поиск
-- Эквалайзер, выравнивание громкости, плавная пауза, скорость, продолжение с того же места
-- Живые фоны (звёзды, аврора, плёнка, обложка), стекло Windows 11, цвет из обложки, визуализатор
-- Меню в трее с управлением, сворачивание в трей, медиаклавиши и горячие клавиши
-- Полная поддержка Английского и Русского языков
+<a href="https://github.com/wtf40iq/Melo/releases/latest">
+  <img src="https://img.shields.io/badge/⬇%20Скачать%20Melo.exe-8b5cf6?style=for-the-badge" height="44" alt="Скачать" />
+</a>
 
+<br /><br />
+
+<!-- Добавьте скриншот: положите файл в docs/screenshot.png и раскомментируйте строку ниже -->
+<!-- <img src="docs/screenshot.png" width="90%" alt="Скриншот Melo" /> -->
+
+</div>
+
+---
+
+## ✨ Возможности
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🎧 Музыка
+- **Моя музыка**, плейлисты и **«Моя волна»**
+- Обзор и быстрый поиск
+- Очередь воспроизведения и тексты песен
+- Продолжение с того же места
+
+</td>
+<td width="50%" valign="top">
+
+### 🎛 Звук
+- Эквалайзер с пресетами
+- Выравнивание громкости
+- Плавная пауза и смена скорости
+- Визуализатор
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🎨 Оформление
+- Живые фоны: звёзды, аврора, плёнка, обложка
+- Стекло Windows 11 (Mica / Acrylic)
+- Цвет интерфейса из обложки трека
+- Русский и английский языки
+
+</td>
+<td width="50%" valign="top">
+
+### ⚡ Удобство
+- Вход по **QR-коду** или через страницу ВК
+- Несколько аккаунтов
+- Трей, медиаклавиши, горячие клавиши
+- Обновление в один клик
+
+</td>
+</tr>
+</table>
+
+## 🚀 Установка
+
+1. Скачайте **`Melo.exe`** со страницы [Releases](https://github.com/wtf40iq/Melo/releases/latest).
+2. Запустите. Установка не нужна.
+3. Войдите по QR-коду из приложения ВКонтакте.
+
+> Melo сам проверяет обновления. Отключить это можно в **Настройки → О приложении**.
+
+## 🔒 Приватность
+
+- Пароль **никогда** не попадает в Melo: вход идёт через официальные механизмы ВК.
+- Ключ входа хранится **только на вашем компьютере**.
+- Никакой рекламы, аналитики и сбора данных.
+
+## 🛠 Сборка из исходников
+
+<p>
+<img src="https://img.shields.io/badge/Tauri_2-24C8D8?style=flat-square&logo=tauri&logoColor=white" />
+<img src="https://img.shields.io/badge/React_18-20232A?style=flat-square&logo=react&logoColor=61DAFB" />
+<img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" />
+<img src="https://img.shields.io/badge/Vite-646CFF?style=flat-square&logo=vite&logoColor=white" />
+<img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" />
+</p>
+
+Нужны [Node.js 22+](https://nodejs.org) и [Rust](https://rustup.rs).
+
+```bash
+git clone https://github.com/wtf40iq/Melo.git
+cd Melo
+npm install
+npm run tauri dev      # запуск в режиме разработки
+npm run tauri build    # сборка релиза
+```
+
+Релизы собираются автоматически через GitHub Actions при пуше тега `v*`.
+
+## ⚠️ Дисклеймер
+
+Melo — неофициальный клиент. Проект не связан с VK и не одобрен им. «ВКонтакте» и VK — товарные знаки их правообладателей.
+
+<div align="center">
+<br />
+
+Сделано с 💜 · Если Melo вам нравится — поставьте ⭐
+
+</div>
