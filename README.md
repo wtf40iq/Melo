@@ -87,27 +87,6 @@
 - Ключ входа хранится **только на вашем компьютере**.
 - Никакой рекламы, аналитики и сбора данных.
 
-## 🛠 Сборка из исходников
-
-<p>
-<img src="https://img.shields.io/badge/Tauri_2-24C8D8?style=flat-square&logo=tauri&logoColor=white" />
-<img src="https://img.shields.io/badge/React_18-20232A?style=flat-square&logo=react&logoColor=61DAFB" />
-<img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" />
-<img src="https://img.shields.io/badge/Vite-646CFF?style=flat-square&logo=vite&logoColor=white" />
-<img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" />
-</p>
-
-Нужны [Node.js 22+](https://nodejs.org) и [Rust](https://rustup.rs).
-
-```bash
-git clone https://github.com/wtf40iq/Melo.git
-cd Melo
-npm install
-npm run tauri dev      # запуск в режиме разработки
-npm run tauri build    # сборка релиза
-```
-
-Релизы собираются автоматически через GitHub Actions при пуше тега `v*`.
 
 ## ⚠️ Дисклеймер
 
