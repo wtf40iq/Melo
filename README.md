@@ -21,8 +21,7 @@
 
 <br /><br />
 
-<!-- Добавьте скриншот: положите файл в docs/screenshot.png и раскомментируйте строку ниже -->
-<!-- <img src="docs/screenshot.png" width="90%" alt="Скриншот Melo" /> -->
+<img src="docs/screenshots/1-home.png" width="100%" alt="Melo — главная" />
 
 </div>
 
@@ -73,6 +72,21 @@
 </tr>
 </table>
 
+## 📸 Скриншоты
+
+<table>
+<tr>
+<td><img src="docs/screenshots/2-library.png" alt="Моя музыка" /></td>
+<td><img src="docs/screenshots/3-explore.png" alt="Обзор" /></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/4-queue.png" alt="Очередь" /></td>
+<td><img src="docs/screenshots/5-eq.png" alt="Эквалайзер" /></td>
+</tr>
+</table>
+
+<div align="center"><img src="docs/screenshots/6-login.png" width="70%" alt="Вход по QR-коду" /></div>
+
 ## 🚀 Установка
 
 1. Скачайте **`Melo.exe`** со страницы [Releases](https://github.com/wtf40iq/Melo/releases/latest).
@@ -87,6 +101,27 @@
 - Ключ входа хранится **только на вашем компьютере**.
 - Никакой рекламы, аналитики и сбора данных.
 
+## 🛠 Сборка из исходников
+
+<p>
+<img src="https://img.shields.io/badge/Tauri_2-24C8D8?style=flat-square&logo=tauri&logoColor=white" />
+<img src="https://img.shields.io/badge/React_18-20232A?style=flat-square&logo=react&logoColor=61DAFB" />
+<img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white" />
+<img src="https://img.shields.io/badge/Vite-646CFF?style=flat-square&logo=vite&logoColor=white" />
+<img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" />
+</p>
+
+Нужны [Node.js 22+](https://nodejs.org) и [Rust](https://rustup.rs).
+
+```bash
+git clone https://github.com/wtf40iq/Melo.git
+cd Melo
+npm install
+npm run tauri dev      # запуск в режиме разработки
+npm run tauri build    # сборка релиза
+```
+
+Релизы собираются автоматически через GitHub Actions при пуше тега `v*`.
 
 ## ⚠️ Дисклеймер
 
