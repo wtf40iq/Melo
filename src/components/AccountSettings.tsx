@@ -1,6 +1,6 @@
 // Раздел настроек «Аккаунт Melo»: способы входа, итоги года, управление аккаунтом.
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { BarChart3, Link2, Loader2, LogOut, Mail, Pencil, ShieldOff, Trash2, Unlink } from "lucide-react";
+import { BarChart3, KeyRound, Link2, Loader2, LogOut, Mail, Pencil, ShieldOff, Trash2, Unlink } from "lucide-react";
 import { melo, Stats } from "../api/melo";
 import { useAccount } from "../store/account";
 import { useLibrary } from "../store/library";
@@ -9,7 +9,56 @@ import { useUi } from "../store/ui";
 import { Captcha } from "./Captcha";
 import { Dialog } from "./Dialog";
 
-const NAMES: Record<string, string> = { vk: "ВКонтакте", email: "Почта", google: "Google" };
+const NAMES: Record<string, string> = { vk: "ВКонтакте", password: "Логин и пароль", email: "Почта", google: "Google" };
+
+type PwPanel = "link" | "change" | "recovery";
+
+/** Добавить логин и пароль, сменить пароль или получить новый код восстановления. */
+function PasswordForm({ mode, onDone }: { mode: PwPanel; onDone: (msg: string) => void }) {
+  const acc = useAccount();
+  const { t, lang } = useSettings();
+  const [login, setLogin] = useState("");
+  const [old, setOld] = useState("");
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [captcha, setCaptcha] = useState("");
+  const [reset, setReset] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const onToken = useCallback((v: string) => setCaptcha(v), []);
+  const needNew = mode !== "recovery";
+  const ready =
+    (mode === "link" ? /^[a-z0-9][a-z0-9_.]{2,31}$/.test(login.trim().toLowerCase()) && (!acc.config?.captcha || !!captcha) : !!old) &&
+    (!needNew || (pw.length >= 8 && pw === pw2));
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!ready || busy) return;
+    setBusy(true);
+    const ok =
+      mode === "link" ? await acc.pwRegister(login.trim().toLowerCase(), pw, captcha)
+      : mode === "change" ? await acc.changePassword(old, pw)
+      : await acc.newRecovery(old);
+    setBusy(false);
+    setCaptcha("");
+    setReset((n) => n + 1);
+    if (ok) onDone(mode === "link" ? "Логин и пароль добавлены" : mode === "change" ? "Пароль изменён" : "");
+  };
+  return (
+    <form className="acc-link-form col" onSubmit={submit}>
+      {mode === "link" && <input className="auth-input" autoFocus autoComplete="username" maxLength={32} placeholder={t("Логин")} value={login} onChange={(e) => setLogin(e.target.value.replace(/\s/g, ""))} />}
+      {mode !== "link" && <input className="auth-input" type="password" autoFocus autoComplete="current-password" maxLength={128} placeholder={t("Текущий пароль")} value={old} onChange={(e) => setOld(e.target.value)} />}
+      {needNew && (
+        <>
+          <input className="auth-input" type="password" autoComplete="new-password" maxLength={128} placeholder={t("Новый пароль (от 8 символов)")} value={pw} onChange={(e) => setPw(e.target.value)} />
+          <input className="auth-input" type="password" autoComplete="new-password" maxLength={128} placeholder={t("Повторите пароль")} value={pw2} onChange={(e) => setPw2(e.target.value)} />
+        </>
+      )}
+      {mode === "link" && acc.config?.captcha && <Captcha lang={lang} onToken={onToken} resetKey={reset} />}
+      <button className="btn primary sm-btn" disabled={busy || !ready}>
+        {busy && <Loader2 size={14} className="spin" />} {t(mode === "link" ? "Добавить" : mode === "change" ? "Сменить пароль" : "Показать новый код")}
+      </button>
+    </form>
+  );
+}
 
 function EmailLink({ onDone }: { onDone: () => void }) {
   const acc = useAccount();
@@ -81,6 +130,7 @@ export function AccountSettings() {
   const { t } = useSettings();
   const [dialog, setDialog] = useState<"rename" | "delete" | "history" | null>(null);
   const [linkEmail, setLinkEmail] = useState(false);
+  const [pwPanel, setPwPanel] = useState<PwPanel | null>(null);
   const u = acc.user;
 
   if (!u) {
@@ -93,7 +143,8 @@ export function AccountSettings() {
   }
 
   const has = (p: string) => u.identities.find((i) => i.provider === p);
-  const methods = (["vk", "email", "google"] as const).filter((p) => has(p) || acc.config?.[p]);
+  const methods = (["vk", "password", "email", "google"] as const).filter((p) => has(p) || acc.config?.[p]);
+  const togglePw = (m: PwPanel) => { acc.setError(null); setPwPanel(pwPanel === m ? null : m); };
 
   return (
     <>
@@ -118,6 +169,12 @@ export function AccountSettings() {
                   {t(NAMES[p])}
                   <small>{id ? id.label || t("Привязан") : t("Не привязан")}</small>
                 </span>
+                {id && p === "password" && (
+                  <>
+                    <button className="btn secondary sm-btn" onClick={() => togglePw("change")}><KeyRound size={14} /> {t("Сменить пароль")}</button>
+                    <button className="btn secondary sm-btn" onClick={() => togglePw("recovery")}>{t("Новый код восстановления")}</button>
+                  </>
+                )}
                 {id ? (
                   u.identities.length > 1 && (
                     <button className="btn secondary sm-btn" onClick={() => acc.unlink(p).then((ok) => ok && ui.toast("Способ входа отвязан"))}>
@@ -128,6 +185,8 @@ export function AccountSettings() {
                   <button className="btn secondary sm-btn" disabled={!lib.profile || acc.vkBusy} onClick={() => acc.signInVk().then((ok) => ok && ui.toast("ВКонтакте привязан"))}>
                     <Link2 size={14} /> {t("Привязать текущий ВК")}
                   </button>
+                ) : p === "password" ? (
+                  <button className="btn secondary sm-btn" onClick={() => togglePw("link")}><KeyRound size={14} /> {t("Добавить")}</button>
                 ) : p === "email" ? (
                   <button className="btn secondary sm-btn" onClick={() => setLinkEmail(!linkEmail)}><Mail size={14} /> {t("Привязать")}</button>
                 ) : (
@@ -139,6 +198,9 @@ export function AccountSettings() {
             );
           })}
         </div>
+        {pwPanel && (pwPanel === "link") === !has("password") && (
+          <PasswordForm key={pwPanel} mode={pwPanel} onDone={(msg) => { setPwPanel(null); if (msg) ui.toast(msg); }} />
+        )}
         {linkEmail && !has("email") && <EmailLink onDone={() => { setLinkEmail(false); ui.toast("Почта привязана"); }} />}
         {acc.error && <div className="auth-error">{t(acc.error)}</div>}
 

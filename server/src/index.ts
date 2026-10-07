@@ -1,4 +1,4 @@
-// Melo API — аккаунты, вход (ВК / почта / Google) и синхронизация.
+// Melo API — аккаунты, вход (ВК / логин и пароль / почта / Google) и синхронизация.
 // Cloudflare Worker + D1. Без внешних зависимостей.
 
 export interface Env {
@@ -134,7 +134,7 @@ async function requireUser(env: Env, req: Request) {
  */
 async function signIn(
   env: Env,
-  provider: "vk" | "email" | "google",
+  provider: "vk" | "email" | "google" | "password",
   subject: string,
   profile: { name?: string; avatar?: string; label?: string },
   linkTo: User | null,
@@ -317,6 +317,162 @@ async function emailVerify(env: Env, req: Request) {
   return loginResponse(env, req, user, created, !!linkTo);
 }
 
+// ---------- Вход по логину и паролю ----------
+
+const LOGIN_RE = /^[a-z0-9][a-z0-9_.]{2,31}$/;
+const PW_ITERS = 100_000; // максимум для PBKDF2 в Workers
+const RC_ABC = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // без 0/O/1/I
+
+const normLogin = (v: unknown) => str(v, 64).toLowerCase();
+
+function checkPassword(pw: string) {
+  if (pw.length < 8) throw new HttpError(400, "weak_password", "Пароль должен быть не короче 8 символов");
+  if (pw.length > 128) throw new HttpError(400, "weak_password", "Пароль слишком длинный");
+}
+
+async function pbkdf2(pw: string, salt: string, iters: number) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", hash: "SHA-256", salt: new TextEncoder().encode(salt), iterations: iters }, key, 256);
+  return b64url(bits);
+}
+
+function sameStr(a: string, b: string) {
+  if (a.length !== b.length) return false;
+  let d = 0;
+  for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return d === 0;
+}
+
+function newRecoveryCode() {
+  const r = crypto.getRandomValues(new Uint8Array(20));
+  const s = Array.from(r, (b) => RC_ABC[b & 31]).join("");
+  return `MELO-${s.slice(0, 5)}-${s.slice(5, 10)}-${s.slice(10, 15)}-${s.slice(15)}`;
+}
+const normRecovery = (v: unknown) => str(v, 64).toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^MELO/, "");
+const recoveryHash = (userId: string, code: string) => sha256(`rc:${userId}:${normRecovery(code)}`);
+
+async function pwRecord(pw: string) {
+  const salt = randomToken(16);
+  return { salt, hash: await pbkdf2(pw, salt, PW_ITERS), iters: PW_ITERS };
+}
+
+type PwRow = { user_id: string; login: string; pw_hash: string; pw_salt: string; iters: number; recovery_hash: string };
+
+/** Не даём подбирать пароль: 5 ошибок на логин за 15 минут. */
+async function failGuard(env: Env, login: string, kind = "pwfail") {
+  const w = Math.floor(now() / 900) * 900;
+  const row = await env.DB.prepare("SELECT win_start, count FROM rate_limits WHERE key = ?").bind(`${kind}:${login}`)
+    .first<{ win_start: number; count: number }>();
+  if (row && row.win_start === w && row.count >= 5)
+    throw new HttpError(429, "rate_limited", "Слишком много неверных попыток. Попробуйте через 15 минут");
+}
+const failNote = (env: Env, login: string, kind = "pwfail") => rateLimit(env, `${kind}:${login}`, 1e9, 900);
+
+async function pwRegister(env: Env, req: Request) {
+  const b = await body<{ login?: string; password?: string; captcha?: string }>(req, 8192);
+  const login = normLogin(b.login);
+  const password = typeof b.password === "string" ? b.password : "";
+  if (!LOGIN_RE.test(login)) throw new HttpError(400, "bad_login", "Логин: 3–32 символа, латиница, цифры, точка или _");
+  checkPassword(password);
+  await rateLimit(env, `pwreg:${ip(req)}`, 10, 3600);
+  await checkTurnstile(env, req, str(b.captcha, 4096));
+  const linkTo = await authUser(env, req);
+  if (linkTo && (await env.DB.prepare("SELECT 1 FROM passwords WHERE user_id = ?").bind(linkTo.id).first()))
+    throw new HttpError(409, "has_password", "У аккаунта уже есть логин и пароль");
+  if (await env.DB.prepare("SELECT 1 FROM passwords WHERE login = ?").bind(login).first())
+    throw new HttpError(409, "login_taken", "Этот логин уже занят");
+
+  const { user, created } = await signIn(env, "password", login, { name: login, label: login }, linkTo);
+  const rec = await pwRecord(password);
+  const recovery = newRecoveryCode();
+  await env.DB.prepare(
+    "INSERT INTO passwords (user_id, login, pw_hash, pw_salt, iters, recovery_hash, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).bind(user.id, login, rec.hash, rec.salt, rec.iters, await recoveryHash(user.id, recovery), now()).run();
+  const token = linkTo ? null : await createSession(env, user.id, str(req.headers.get("User-Agent"), 80));
+  return json({ token, created, recovery, user: await userPayload(env, user) });
+}
+
+async function pwLogin(env: Env, req: Request) {
+  const b = await body<{ login?: string; password?: string; captcha?: string }>(req, 8192);
+  const login = normLogin(b.login);
+  const password = typeof b.password === "string" ? b.password.slice(0, 128) : "";
+  await rateLimit(env, `pwlogin:${ip(req)}`, 30, 600);
+  await checkTurnstile(env, req, str(b.captcha, 4096));
+  await failGuard(env, login);
+  const row = await env.DB.prepare("SELECT * FROM passwords WHERE login = ?").bind(login).first<PwRow>();
+  if (!row || !sameStr(await pbkdf2(password, row.pw_salt, row.iters), row.pw_hash)) {
+    await failNote(env, login);
+    throw new HttpError(400, "bad_credentials", "Неверный логин или пароль");
+  }
+  const user = await env.DB.prepare("SELECT id, name, avatar, created_at FROM users WHERE id = ?").bind(row.user_id).first<User>();
+  if (!user) throw new HttpError(400, "bad_credentials", "Неверный логин или пароль");
+  return loginResponse(env, req, user, false, false);
+}
+
+/** Новый пароль по коду восстановления. Все старые сессии завершаются. */
+async function pwRecover(env: Env, req: Request) {
+  const b = await body<{ login?: string; recovery?: string; password?: string; captcha?: string }>(req, 8192);
+  const login = normLogin(b.login);
+  const password = typeof b.password === "string" ? b.password : "";
+  checkPassword(password);
+  await rateLimit(env, `pwrec:${ip(req)}`, 10, 3600);
+  await checkTurnstile(env, req, str(b.captcha, 4096));
+  await failGuard(env, login, "rcfail");
+  const row = await env.DB.prepare("SELECT * FROM passwords WHERE login = ?").bind(login).first<PwRow>();
+  if (!row || !sameStr(await recoveryHash(row.user_id, str(b.recovery, 64)), row.recovery_hash)) {
+    await failNote(env, login, "rcfail");
+    throw new HttpError(400, "bad_recovery", "Неверный логин или код восстановления");
+  }
+  const rec = await pwRecord(password);
+  const recovery = newRecoveryCode();
+  await env.DB.batch([
+    env.DB.prepare("UPDATE passwords SET pw_hash = ?, pw_salt = ?, iters = ?, recovery_hash = ?, updated_at = ? WHERE user_id = ?")
+      .bind(rec.hash, rec.salt, rec.iters, await recoveryHash(row.user_id, recovery), now(), row.user_id),
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(row.user_id),
+  ]);
+  const user = (await env.DB.prepare("SELECT id, name, avatar, created_at FROM users WHERE id = ?").bind(row.user_id).first<User>())!;
+  const token = await createSession(env, user.id, str(req.headers.get("User-Agent"), 80));
+  return json({ token, created: false, recovery, user: await userPayload(env, user) });
+}
+
+/** Проверка текущего пароля для действий из настроек. */
+async function pwVerifyCurrent(env: Env, user: User, password: string) {
+  const row = await env.DB.prepare("SELECT * FROM passwords WHERE user_id = ?").bind(user.id).first<PwRow>();
+  if (!row) throw new HttpError(404, "no_password", "У аккаунта нет пароля");
+  await failGuard(env, row.login);
+  if (!sameStr(await pbkdf2(password.slice(0, 128), row.pw_salt, row.iters), row.pw_hash)) {
+    await failNote(env, row.login);
+    throw new HttpError(400, "bad_password", "Неверный текущий пароль");
+  }
+  return row;
+}
+
+async function pwChange(env: Env, req: Request, user: User) {
+  const b = await body<{ old?: string; password?: string }>(req, 4096);
+  const password = typeof b.password === "string" ? b.password : "";
+  checkPassword(password);
+  await pwVerifyCurrent(env, user, typeof b.old === "string" ? b.old : "");
+  const rec = await pwRecord(password);
+  const cur = await sha256((req.headers.get("Authorization") || "").replace(/^Bearer\s+/, ""));
+  await env.DB.batch([
+    env.DB.prepare("UPDATE passwords SET pw_hash = ?, pw_salt = ?, iters = ?, updated_at = ? WHERE user_id = ?")
+      .bind(rec.hash, rec.salt, rec.iters, now(), user.id),
+    // Остальные устройства выходят — на случай, если пароль меняют из-за утечки
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ? AND token_hash != ?").bind(user.id, cur),
+  ]);
+  return json({ ok: true });
+}
+
+async function pwNewRecovery(env: Env, req: Request, user: User) {
+  const b = await body<{ password?: string }>(req, 4096);
+  await pwVerifyCurrent(env, user, typeof b.password === "string" ? b.password : "");
+  const recovery = newRecoveryCode();
+  await env.DB.prepare("UPDATE passwords SET recovery_hash = ?, updated_at = ? WHERE user_id = ?")
+    .bind(await recoveryHash(user.id, recovery), now(), user.id).run();
+  return json({ recovery });
+}
+
 // ---------- Вход через Google (в системном браузере) ----------
 
 const googleEnabled = (env: Env) => !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
@@ -434,7 +590,10 @@ async function logout(env: Env, req: Request) {
 async function unlink(env: Env, user: User, provider: string) {
   const ids = await env.DB.prepare("SELECT provider FROM identities WHERE user_id = ?").bind(user.id).all<{ provider: string }>();
   if (ids.results.length <= 1) throw new HttpError(400, "last_identity", "Нельзя отвязать единственный способ входа");
-  await env.DB.prepare("DELETE FROM identities WHERE user_id = ? AND provider = ?").bind(user.id, provider).run();
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM identities WHERE user_id = ? AND provider = ?").bind(user.id, provider),
+    ...(provider === "password" ? [env.DB.prepare("DELETE FROM passwords WHERE user_id = ?").bind(user.id)] : []),
+  ]);
   return json({ user: await userPayload(env, user) });
 }
 
@@ -643,6 +802,7 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (p === "/config" && M === "GET")
     return json({
       vk: true,
+      password: true,
       email: emailEnabled(env),
       google: googleEnabled(env),
       captcha: !!(env.TURNSTILE_SITE_KEY && env.TURNSTILE_SECRET),
@@ -656,6 +816,9 @@ async function route(req: Request, env: Env): Promise<Response> {
   if (p === "/auth/google/go" && M === "GET") return googleGo(env, url, origin);
   if (p === "/auth/google/callback" && M === "GET") return googleCallback(env, url, origin);
   if (p === "/auth/google/poll" && M === "POST") return googlePoll(env, req);
+  if (p === "/auth/password/register" && M === "POST") return pwRegister(env, req);
+  if (p === "/auth/password/login" && M === "POST") return pwLogin(env, req);
+  if (p === "/auth/password/recover" && M === "POST") return pwRecover(env, req);
   if (p === "/auth/logout" && M === "POST") return logout(env, req);
 
   const share = p.match(/^\/share\/([A-Za-z0-9_-]{6,40})$/);
@@ -675,8 +838,10 @@ async function route(req: Request, env: Env): Promise<Response> {
     await env.DB.prepare("DELETE FROM users WHERE id = ?").bind(user.id).run();
     return json({ ok: true });
   }
-  const un = p.match(/^\/me\/identities\/(vk|email|google)$/);
+  const un = p.match(/^\/me\/identities\/(vk|email|google|password)$/);
   if (un && M === "DELETE") return unlink(env, user, un[1]);
+  if (p === "/me/password" && M === "PUT") return pwChange(env, req, user);
+  if (p === "/me/password/recovery" && M === "POST") return pwNewRecovery(env, req, user);
   if (p === "/me/sessions" && M === "DELETE") {
     await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(user.id).run();
     return json({ ok: true });

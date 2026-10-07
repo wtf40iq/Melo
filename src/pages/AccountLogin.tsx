@@ -1,6 +1,6 @@
-// Обязательный вход в аккаунт Melo: ВКонтакте (рекомендуем), почта или Google.
+// Обязательный вход в аккаунт Melo: ВКонтакте (рекомендуем), логин и пароль, почта или Google.
 import { FormEvent, useCallback, useEffect, useState } from "react";
-import { ArrowLeft, Check, Cloud, Loader2, Mail, RefreshCw, WifiOff } from "lucide-react";
+import { ArrowLeft, Check, Cloud, Eye, EyeOff, KeyRound, Loader2, Mail, RefreshCw, WifiOff } from "lucide-react";
 import { Logo } from "../components/Logo";
 import { Captcha } from "../components/Captcha";
 import { LegalDialog } from "../components/LegalDialog";
@@ -23,7 +23,9 @@ const GoogleIcon = () => (
   </svg>
 );
 
-type Step = "choose" | "email" | "code";
+type Step = "choose" | "email" | "code" | "pw";
+type PwMode = "login" | "register" | "recover";
+const LOGIN_RE = /^[a-z0-9][a-z0-9_.]{2,31}$/;
 
 export function AccountLogin({ onVk }: { onVk: () => void }) {
   const acc = useAccount();
@@ -39,6 +41,12 @@ export function AccountLogin({ onVk }: { onVk: () => void }) {
   const [, tick] = useState(0);
   const [agreed, setAgreed] = useState(termsAccepted);
   const [doc, setDoc] = useState<"terms" | "privacy" | null>(null);
+  const [pwMode, setPwMode] = useState<PwMode>("login");
+  const [login, setLogin] = useState("");
+  const [password, setPassword] = useState("");
+  const [password2, setPassword2] = useState("");
+  const [rcode, setRcode] = useState("");
+  const [showPw, setShowPw] = useState(false);
   const cfg = acc.config;
   const onToken = useCallback((v: string) => setCaptcha(v), []);
 
@@ -48,7 +56,7 @@ export function AccountLogin({ onVk }: { onVk: () => void }) {
     return () => clearInterval(id);
   }, [step]);
 
-  const back = () => { acc.setError(null); setStep(step === "code" ? "email" : "choose"); setCode(""); };
+  const back = () => { acc.setError(null); setStep(step === "code" ? "email" : "choose"); setCode(""); setPwMode("login"); };
 
   const vk = async () => {
     acc.setError(null);
@@ -79,6 +87,27 @@ export function AccountLogin({ onVk }: { onVk: () => void }) {
     }
   };
 
+  const submitPw = async (e: FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    const l = login.trim().toLowerCase();
+    if (pwMode === "login") await acc.pwLogin(l, password, captcha);
+    else if (pwMode === "register") await acc.pwRegister(l, password, captcha);
+    else await acc.pwRecover(l, rcode, password, captcha);
+    setBusy(false);
+    setCaptcha("");
+    setCaptchaReset((n) => n + 1);
+  };
+  const switchPw = (m: PwMode) => { acc.setError(null); setPwMode(m); setPassword(""); setPassword2(""); };
+  const lNorm = login.trim().toLowerCase();
+  const pwHint =
+    pwMode !== "login" && login && !LOGIN_RE.test(lNorm) ? "Логин: 3–32 символа, латиница, цифры, точка или _"
+    : pwMode !== "login" && password && password.length < 8 ? "Пароль должен быть не короче 8 символов"
+    : pwMode !== "login" && password2 && password !== password2 ? "Пароли не совпадают"
+    : null;
+  const pwReady = !!lNorm && !!password && (pwMode === "login" || (!pwHint && password === password2)) && (pwMode !== "recover" || rcode.trim().length >= 20);
+
   const wait = Math.max(0, Math.ceil((resendAt - Date.now()) / 1000));
   const needCaptcha = !!cfg?.captcha;
 
@@ -108,6 +137,11 @@ export function AccountLogin({ onVk }: { onVk: () => void }) {
               {t(lib.profile ? "Продолжить с ВКонтакте" : "Войти через ВКонтакте")}
               <span className="auth-badge">{t("Рекомендуем")}</span>
             </button>
+            {cfg?.password && (
+              <button className="btn secondary wide" disabled={!agreed || acc.googleWaiting} onClick={() => { acc.setError(null); setStep("pw"); }}>
+                <KeyRound size={18} /> {t("Логин и пароль")}
+              </button>
+            )}
             {cfg?.email !== false && (
               <button className="btn secondary wide" disabled={!agreed || !cfg?.email || acc.googleWaiting} onClick={() => { acc.setError(null); setStep("email"); }}>
                 <Mail size={18} /> {t("Войти по почте")}
@@ -144,6 +178,41 @@ export function AccountLogin({ onVk }: { onVk: () => void }) {
             <button className="btn primary wide" disabled={busy || !/\S+@\S+\.\S+/.test(email) || (needCaptcha && !captcha)}>
               {busy ? <Loader2 size={18} className="spin" /> : <Mail size={18} />} {t("Получить код")}
             </button>
+          </form>
+        )}
+
+        {step === "pw" && (
+          <form className="auth-form" onSubmit={submitPw}>
+            <div className="auth-tabs">
+              <button type="button" className={pwMode === "login" ? "on" : ""} onClick={() => switchPw("login")}>{t("Вход")}</button>
+              <button type="button" className={pwMode === "register" ? "on" : ""} onClick={() => switchPw("register")}>{t("Регистрация")}</button>
+            </div>
+            {pwMode === "recover" && <span className="code-hint">{t("Введите логин и код восстановления, который вы сохранили при регистрации.")}</span>}
+            <input className="auth-input" autoFocus autoComplete="username" placeholder={t("Логин")} value={login}
+              maxLength={32} onChange={(e) => setLogin(e.target.value.replace(/\s/g, ""))} />
+            {pwMode === "recover" && (
+              <input className="auth-input mono" autoComplete="off" placeholder="MELO-XXXXX-XXXXX-XXXXX-XXXXX" value={rcode}
+                maxLength={40} onChange={(e) => setRcode(e.target.value.toUpperCase())} />
+            )}
+            <div className="auth-pw">
+              <input className="auth-input" type={showPw ? "text" : "password"} maxLength={128}
+                autoComplete={pwMode === "login" ? "current-password" : "new-password"}
+                placeholder={t(pwMode === "login" ? "Пароль" : "Новый пароль")} value={password} onChange={(e) => setPassword(e.target.value)} />
+              <button type="button" className="icon-btn sm" onClick={() => setShowPw(!showPw)} aria-label={t(showPw ? "Скрыть пароль" : "Показать пароль")}>
+                {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+            {pwMode !== "login" && (
+              <input className="auth-input" type={showPw ? "text" : "password"} maxLength={128} autoComplete="new-password"
+                placeholder={t("Повторите пароль")} value={password2} onChange={(e) => setPassword2(e.target.value)} />
+            )}
+            {pwHint && <small className="faint">{t(pwHint)}</small>}
+            {needCaptcha && <Captcha lang={lang} onToken={onToken} resetKey={captchaReset} />}
+            <button className="btn primary wide" disabled={busy || !pwReady || (needCaptcha && !captcha)}>
+              {busy && <Loader2 size={18} className="spin" />}
+              {t(pwMode === "login" ? "Войти" : pwMode === "register" ? "Создать аккаунт" : "Сменить пароль и войти")}
+            </button>
+            {pwMode === "login" && <button type="button" className="link-btn" onClick={() => switchPw("recover")}>{t("Забыли пароль?")}</button>}
           </form>
         )}
 
@@ -186,7 +255,7 @@ export function AccountLogin({ onVk }: { onVk: () => void }) {
           </label>
         )}
         {doc && <LegalDialog doc={doc} onClose={() => setDoc(null)} />}
-        <small className="auth-foot"><Cloud size={13} /> {t("Пароли и ключи ВК не хранятся на сервере Melo.")}</small>
+        <small className="auth-foot"><Cloud size={13} /> {t("Ключи ВК не хранятся на сервере Melo, пароли — только в виде хеша.")}</small>
       </div>
     </div>
   );

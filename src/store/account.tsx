@@ -1,8 +1,9 @@
-// Аккаунт Melo: вход (ВК / почта / Google), хранение сессии и привязка ВК.
+// Аккаунт Melo: вход (ВК / логин и пароль / почта / Google), хранение сессии и привязка ВК.
 import { createContext, ReactNode, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { MeloConfig, MeloError, MeloSession, MeloUser, loadSession, melo, openExternal, saveSession, setToken, vkProof } from "../api/melo";
 import { useLibrary } from "./library";
+import { RecoveryCodeDialog } from "../components/RecoveryCodeDialog";
 
 type AccountState = {
   /** Пока читаем сохранённую сессию */
@@ -23,6 +24,11 @@ type AccountState = {
   google: (link?: boolean) => Promise<boolean>;
   cancelGoogle: () => void;
   googleWaiting: boolean;
+  pwRegister: (login: string, password: string, captcha: string) => Promise<boolean>;
+  pwLogin: (login: string, password: string, captcha: string) => Promise<boolean>;
+  pwRecover: (login: string, recovery: string, password: string, captcha: string) => Promise<boolean>;
+  changePassword: (old: string, password: string) => Promise<boolean>;
+  newRecovery: (password: string) => Promise<boolean>;
   logout: () => Promise<void>;
   deleteAccount: () => Promise<boolean>;
   unlink: (provider: string) => Promise<boolean>;
@@ -44,6 +50,8 @@ export function AccountProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [googleWaiting, setGoogleWaiting] = useState(false);
   const googleCancel = useRef(false);
+  /** Код восстановления, который нужно один раз показать пользователю */
+  const [recovery, setRecovery] = useState<string | null>(null);
 
   const apply = useCallback(async (s: MeloSession | null) => {
     setToken(s?.token ?? null);
@@ -200,6 +208,50 @@ export function AccountProvider({ children }: { children: ReactNode }) {
     google: (link = false) => googleFlow(link),
     cancelGoogle: () => { googleCancel.current = true; },
     googleWaiting,
+    pwRegister: async (login, password, captcha) => {
+      try {
+        const r = await melo.pwRegister(login, password, captcha);
+        setRecovery(r.recovery);
+        return await finish(r);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+    pwLogin: async (login, password, captcha) => {
+      try {
+        return await finish(await melo.pwLogin(login, password, captcha));
+      } catch (e) {
+        if (e instanceof MeloError && e.status === 0) setOffline(true);
+        return fail(e);
+      }
+    },
+    pwRecover: async (login, code, password, captcha) => {
+      try {
+        const r = await melo.pwRecover(login, code, password, captcha);
+        setRecovery(r.recovery);
+        return await finish(r);
+      } catch (e) {
+        return fail(e);
+      }
+    },
+    changePassword: async (old, password) => {
+      try {
+        await melo.changePassword(old, password);
+        setError(null);
+        return true;
+      } catch (e) {
+        return fail(e);
+      }
+    },
+    newRecovery: async (password) => {
+      try {
+        setRecovery((await melo.newRecovery(password)).recovery);
+        setError(null);
+        return true;
+      } catch (e) {
+        return fail(e);
+      }
+    },
     logout: async () => {
       await melo.logout().catch(() => {});
       linkedFor.current = lib.profile?.id ?? null; // не входить снова автоматически
@@ -238,7 +290,12 @@ export function AccountProvider({ children }: { children: ReactNode }) {
       } catch { /* */ }
     },
   };
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={value}>
+      {children}
+      {recovery && <RecoveryCodeDialog code={recovery} login={session?.user.identities.find((i) => i.provider === "password")?.label ?? ""} onClose={() => setRecovery(null)} />}
+    </Ctx.Provider>
+  );
 }
 
 export const useAccount = () => {

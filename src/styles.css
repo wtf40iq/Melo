@@ -1200,3 +1200,15 @@ html.glass .queue { background: rgba(24, 25, 32, .78) !important; backdrop-filte
 .stats-cols li span { display: inline-block; max-width: 85%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .stats-cols li > small { float: right; color: var(--faint); }
 .stats-cols li span small { color: var(--faint); }
+
+/* Вход по логину и паролю */
+.auth-tabs { display: flex; gap: 4px; padding: 4px; border-radius: 12px; background: var(--surface, rgba(255,255,255,.04)); border: 1px solid var(--border); align-self: stretch; }
+.auth-tabs button { flex: 1; height: 34px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; }
+.auth-tabs button.on { background: var(--accent-soft); color: var(--text); font-weight: 600; }
+.auth-pw { position: relative; display: flex; align-self: stretch; }
+.auth-pw .auth-input { flex: 1; padding-right: 44px; }
+.auth-pw .icon-btn { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); }
+.auth-input.mono, .recovery-code { font-family: "Cascadia Mono", Consolas, monospace; letter-spacing: .04em; }
+.recovery-code { display: block; padding: 12px 14px; margin: 4px 0 10px; border-radius: 12px; border: 1px dashed var(--accent); background: var(--accent-soft); font-size: 16px; user-select: all; text-align: center; }
+.acc-link-form.col { flex-direction: column; align-items: stretch; max-width: 360px; }
+.acc-link-form.col .auth-input { min-width: 0; }

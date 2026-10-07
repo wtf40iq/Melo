@@ -5,10 +5,10 @@ import { inTauri } from "./env";
 /** Адрес сервера. Для сборки можно переопределить переменной VITE_MELO_API. */
 export const MELO_API: string = (import.meta.env.VITE_MELO_API as string | undefined)?.replace(/\/+$/, "") || "https://melo-api.skymywex.workers.dev";
 
-export type Identity = { provider: "vk" | "email" | "google"; label: string | null; created_at: number };
+export type Identity = { provider: "vk" | "email" | "google" | "password"; label: string | null; created_at: number };
 export type MeloUser = { id: string; name: string | null; avatar: string | null; created_at: number; identities: Identity[] };
 export type MeloSession = { token: string; user: MeloUser };
-export type MeloConfig = { vk: boolean; email: boolean; google: boolean; captcha: boolean };
+export type MeloConfig = { vk: boolean; password?: boolean; email: boolean; google: boolean; captcha: boolean };
 
 export type TrackRef = {
   source: string; id: string; title: string; artist: string;
@@ -98,6 +98,7 @@ export async function vkProof(): Promise<{ token: string; client: string } | nul
 // ---------- Методы ----------
 
 type Login = { token: string | null; created: boolean; user: MeloUser };
+type PwLogin = Login & { recovery: string };
 
 export const melo = {
   config: () => req<MeloConfig>("GET", "/config", undefined, { auth: false }),
@@ -111,6 +112,13 @@ export const melo = {
   googlePoll: (id: string, poll_secret: string) =>
     req<{ state: "waiting" | "ok" | "error" | "expired"; message?: string; token?: string | null; user?: MeloUser }>(
       "POST", "/auth/google/poll", { id, poll_secret }),
+  /** Регистрация по логину и паролю (или, если уже вошли, — добавление пароля к аккаунту). */
+  pwRegister: (login: string, password: string, captcha: string) => req<PwLogin>("POST", "/auth/password/register", { login, password, captcha }),
+  pwLogin: (login: string, password: string, captcha: string) => req<Login>("POST", "/auth/password/login", { login, password, captcha }, { auth: false }),
+  pwRecover: (login: string, recovery: string, password: string, captcha: string) =>
+    req<PwLogin>("POST", "/auth/password/recover", { login, recovery, password, captcha }, { auth: false }),
+  changePassword: (old: string, password: string) => req<{ ok: true }>("PUT", "/me/password", { old, password }),
+  newRecovery: (password: string) => req<{ recovery: string }>("POST", "/me/password/recovery", { password }),
   logout: () => req("POST", "/auth/logout"),
 
   me: () => req<{ user: MeloUser }>("GET", "/me"),
