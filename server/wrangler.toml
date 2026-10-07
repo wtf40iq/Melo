@@ -1,0 +1,20 @@
+name = "melo-api"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+# Раз в сутки чистим просроченные сессии, коды и лимиты
+[triggers]
+crons = ["17 3 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "melo"
+database_id = "e8a43e05-5d39-4adc-ac45-5bd80a28cd32"
+migrations_dir = "migrations"
+
+[vars]
+# Публичные значения. Секреты (TURNSTILE_SECRET, GOOGLE_CLIENT_SECRET, RESEND_API_KEY)
+# задаются через `wrangler secret put ...`, а не здесь.
+TURNSTILE_SITE_KEY = "0x4AAAAAAFQOoOHrRDDCD1wa"
+GOOGLE_CLIENT_ID = ""
+EMAIL_FROM = ""        # например "Melo <login@your-domain.ru>" — нужен свой домен в Resend

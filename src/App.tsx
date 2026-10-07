@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Welcome } from "./pages/Welcome";
 import { UpdateProvider } from "./store/update";
 import { UpdateDialog } from "./components/UpdateDialog";
@@ -22,12 +22,18 @@ import { SettingsProvider, useSettings } from "./store/settings";
 import { LibraryProvider, useLibrary } from "./store/library";
 import { PlayerProvider, usePlayer } from "./store/player";
 import { UiProvider, useUi } from "./store/ui";
+import { AccountProvider, useAccount } from "./store/account";
+import { AccountLogin } from "./pages/AccountLogin";
+import { CloudSync } from "./components/CloudSync";
+import { Loader2 } from "lucide-react";
 
 function Shell() {
   const ui = useUi();
   const lib = useLibrary();
   const player = usePlayer();
   const settings = useSettings();
+  const acc = useAccount();
+  const [vkStep, setVkStep] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
   const r = ui.route;
   // Первый запуск — приветствие (его можно открыть снова из настроек)
@@ -109,16 +115,34 @@ function Shell() {
     );
   }
 
+  const loggedOut = (body: React.ReactNode) => (
+    <div className="app logged-out">
+      <TitleBar query="" onQuery={() => {}} canBack={false} canForward={false} onBack={() => {}} onForward={() => {}} showSearch={false} />
+      <Effects />
+      {body}
+      <Toasts />
+      <Tooltip />
+    </div>
+  );
+
+  // Ждём сохранённые сессии, чтобы не мигать экраном входа
+  if (acc.booting || lib.booting) {
+    return loggedOut(<div className="login"><Loader2 size={28} className="spin faint" /></div>);
+  }
+
+  // 1. Аккаунт Melo обязателен (без сети можно продолжить без него)
+  if (!acc.user && !acc.offline) {
+    if (lib.profile && acc.vkBusy) {
+      return loggedOut(<div className="login"><div className="auth-wait big"><Loader2 size={20} className="spin" /> {settings.t("Входим в Melo через ВКонтакте…")}</div></div>);
+    }
+    if (vkStep && !lib.profile) return loggedOut(<Login onBack={() => setVkStep(false)} />);
+    return loggedOut(<AccountLogin onVk={() => setVkStep(true)} />);
+  }
+
+  // 2. Музыка пока берётся из ВК — нужен вход в ВК
   if (!lib.profile) {
-    return (
-      <div className="app logged-out">
-        <TitleBar query="" onQuery={() => {}} canBack={false} canForward={false} onBack={() => {}} onForward={() => {}} showSearch={false} />
-        <Effects />
-        <Login />
-        <Toasts />
-        <Tooltip />
-      </div>
-    );
+    const viaVk = acc.user?.identities.some((i) => i.provider === "vk");
+    return loggedOut(<Login note={acc.user && !viaVk ? "Аккаунт Melo готов. Теперь подключите ВКонтакте — музыка берётся оттуда." : undefined} />);
   }
 
   const page = () => {
@@ -142,6 +166,7 @@ function Shell() {
         onBack={ui.back}
         onForward={ui.forward}
       />
+      <CloudSync />
       <Sidebar />
       <main className="main" ref={mainRef}>
         <div className="page-anim" key={ui.query.trim() ? "search" : r.name === "playlist" ? `pl-${r.playlist.id}` : r.name}>
@@ -162,12 +187,14 @@ export default function App() {
     <SettingsProvider>
       <UiProvider>
         <LibraryProvider>
-          <PlayerProvider>
-            <UpdateProvider>
-              <Shell />
-              <UpdateDialog />
-            </UpdateProvider>
-          </PlayerProvider>
+          <AccountProvider>
+            <PlayerProvider>
+              <UpdateProvider>
+                <Shell />
+                <UpdateDialog />
+              </UpdateProvider>
+            </PlayerProvider>
+          </AccountProvider>
         </LibraryProvider>
       </UiProvider>
     </SettingsProvider>

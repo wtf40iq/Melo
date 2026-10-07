@@ -9,6 +9,7 @@ import { useLibrary } from "../store/library";
 import { ACCENTS, useSettings } from "../store/settings";
 import { useUpdate } from "../store/update";
 import { LegalDialog } from "../components/LegalDialog";
+import { AccountSettings } from "../components/AccountSettings";
 
 const freqLabel = (f: number) => (f >= 1000 ? `${f / 1000}k` : String(f));
 
@@ -254,6 +255,8 @@ export function Settings() {
           <Toggle checked={s.closeToTray} onChange={(v) => s.set({ closeToTray: v })} label={t("Сворачивать в трей при закрытии")} />
         </Row>
       </section>
+
+      <AccountSettings />
 
       <section className="set-card">
         <h3>{t("Аккаунты ВКонтакте")}</h3>

@@ -391,6 +391,74 @@ async fn vk_call(
     Ok(res.get("response").cloned().unwrap_or(Value::Null))
 }
 
+// ---------- Аккаунт Melo ----------
+
+/// Токен активного аккаунта ВК — только чтобы сервер Melo один раз проверил,
+/// чей это аккаунт (users.get). Сервер токен не сохраняет.
+#[derive(Serialize)]
+struct VkProof {
+    token: String,
+    client: String,
+}
+
+#[tauri::command]
+fn vk_proof(state: State<'_, AppState>) -> Option<VkProof> {
+    state
+        .session
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| VkProof { token: s.token.clone(), client: s.client.clone() })
+}
+
+/// Сессия Melo (токен и профиль) хранится в папке данных приложения, как и аккаунты ВК.
+#[tauri::command]
+fn melo_session_get(app: AppHandle) -> Option<Value> {
+    data_path(&app, "melo.json")
+        .and_then(|p| fs::read(p).ok())
+        .and_then(|d| serde_json::from_slice(&d).ok())
+}
+
+#[tauri::command]
+fn melo_session_set(app: AppHandle, value: Option<Value>) {
+    let Some(path) = data_path(&app, "melo.json") else { return };
+    match value {
+        Some(v) => {
+            if let Some(dir) = path.parent() {
+                let _ = fs::create_dir_all(dir);
+            }
+            let _ = fs::write(&path, serde_json::to_vec(&v).unwrap_or_default());
+        }
+        None => {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// Открыть https-ссылку в браузере по умолчанию (вход через Google).
+#[tauri::command]
+fn open_url(url: String) -> Result<(), String> {
+    let u = Url::parse(&url).map_err(|_| "Неверная ссылка".to_string())?;
+    if u.scheme() != "https" {
+        return Err("Можно открывать только https-ссылки".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", u.as_str()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open").arg(u.as_str()).spawn().map_err(|e| e.to_string())?;
+    #[cfg(all(unix, not(target_os = "macos")))]
+    std::process::Command::new("xdg-open").arg(u.as_str()).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ---------- Вход по QR-коду ----------
 
 async fn vka_get(http: &reqwest::Client, url: &str, query: &[(&str, &str)]) -> Result<Value, String> {
@@ -1015,7 +1083,7 @@ pub fn run() {
                 responder.respond(proxy(app, request).await);
             });
         })
-        .invoke_handler(tauri::generate_handler![vk_login, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install])
+        .invoke_handler(tauri::generate_handler![vk_login, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install, vk_proof, melo_session_get, melo_session_set, open_url])
         .run(tauri::generate_context!())
         .expect("ошибка при запуске приложения");
 }

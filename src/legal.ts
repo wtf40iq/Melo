@@ -1,6 +1,6 @@
 // Тексты пользовательского соглашения и политики конфиденциальности.
 // При существенных изменениях поднимите LEGAL_VERSION — пользователи примут условия заново.
-export const LEGAL_VERSION = "2026-10-07";
+export const LEGAL_VERSION = "2026-10-08";
 
 type Doc = { title: string; sections: { h: string; p: string[] }[] };
 
@@ -42,21 +42,28 @@ const ru: { terms: Doc; privacy: Doc } = {
     title: "Политика конфиденциальности",
     sections: [
       { h: "Коротко", p: [
-        "Melo не собирает, не продаёт и не передаёт ваши данные. У программы нет своего сервера, аналитики, рекламы и трекеров.",
+        "Melo не продаёт и не передаёт ваши данные третьим лицам. В Melo нет рекламы, аналитики и трекеров.",
+        "Для работы нужен аккаунт Melo. Он хранится на сервере Melo (Cloudflare Workers и база данных Cloudflare D1) и нужен только для синхронизации ваших настроек, плейлистов Melo, избранного и истории прослушиваний между компьютерами.",
       ] },
       { h: "Какие данные хранятся и где", p: [
         "Ключ доступа (токен) ВКонтакте, ваше имя и аватар — чтобы не входить каждый раз. Хранятся только на вашем компьютере, в папке данных Melo (её путь указан в «Настройки → О приложении»).",
         "Настройки, громкость, очередь и место, на котором вы остановились, — в локальном хранилище программы на вашем компьютере.",
         "Пароль от ВКонтакте Melo не получает и не хранит: вы вводите его только на официальной странице ВК.",
+        "На сервере Melo хранятся: способ входа (ID аккаунта ВКонтакте, адрес почты или ID аккаунта Google), имя и аватар; настройки приложения; ваши плейлисты Melo; избранное; история прослушиваний (название и исполнитель трека, сколько секунд слушали, когда) — для статистики и «итогов года».",
+        "Ключ доступа ВКонтакте на сервер не сохраняется: при входе через ВК сервер один раз спрашивает у ВК, чей это аккаунт, и сразу забывает ключ. Сессия Melo хранится на сервере только в виде хеша.",
+        "Коды входа по почте хранятся 10 минут в виде хеша. Технические записи для защиты от перебора — до 2 суток.",
       ] },
       { h: "С кем общается программа", p: [
         "С серверами ВКонтакте (api.vk.com, id.vk.com, login.vk.com и серверами музыки ВК) — чтобы показать вашу музыку и воспроизвести её. Обработка данных на стороне ВК регулируется политикой конфиденциальности ВКонтакте.",
         "С GitHub (api.github.com) — только чтобы проверить и скачать обновления. При этом GitHub не получает никаких данных о вашем аккаунте ВК.",
         "Музыка воспроизводится через маленький локальный сервер на 127.0.0.1, доступный только с вашего компьютера.",
+        "С сервером Melo — для входа и синхронизации. Сервер работает на инфраструктуре Cloudflare, данные могут храниться за пределами вашей страны.",
+        "С Cloudflare Turnstile — проверка «не робот» при входе по почте. С сервисом Resend — чтобы отправить письмо с кодом. С Google — только если вы выбрали вход через Google.",
       ] },
       { h: "Ваш контроль", p: [
         "Выйти из аккаунта можно в меню профиля или в настройках — ключ доступа удалится с компьютера. Удалив папку данных Melo, вы удалите всё, что программа хранила.",
         "Отозвать доступ также можно в настройках безопасности ВКонтакте («Приложения и сайты» / «Активные сеансы»).",
+        "В «Настройки → Аккаунт Melo» можно очистить историю прослушиваний, выйти на всех устройствах или удалить аккаунт Melo — тогда с сервера сразу удаляются все связанные с ним данные.",
       ] },
       { h: "Дети", p: [
         "Melo не предназначена для сбора данных детей и не собирает их. Возрастные ограничения на использование ВКонтакте определяются правилами ВК.",
@@ -97,20 +104,29 @@ const en: typeof ru = {
   privacy: {
     title: "Privacy Policy",
     sections: [
-      { h: "In short", p: ["Melo does not collect, sell or share your data. It has no server of its own, no analytics, no ads and no trackers."] },
+      { h: "In short", p: [
+        "Melo does not sell or share your data with third parties. There are no ads, analytics or trackers.",
+        "Melo requires a Melo account. It is stored on the Melo server (Cloudflare Workers and Cloudflare D1) and is used only to sync your settings, Melo playlists, favorites and listening history between computers.",
+      ] },
       { h: "What is stored and where", p: [
         "Your VK access token, name and avatar, so you don't have to sign in every time. They are stored only on your computer, in Melo's data folder (shown in Settings → About).",
         "Settings, volume, queue and playback position are kept in the app's local storage on your computer.",
         "Melo never receives or stores your VK password: you enter it only on the official VK page.",
+        "The Melo server stores: your sign-in method (VK account ID, email address or Google account ID), name and avatar; app settings; your Melo playlists; favorites; listening history (track title and artist, how many seconds you listened and when) for stats and your year in music.",
+        "Your VK access token is never saved on the server: when you sign in with VK, the server asks VK once whose account it is and immediately forgets the token. Melo sessions are stored on the server only as a hash.",
+        "Email sign-in codes are kept for 10 minutes as a hash. Technical anti-abuse records are kept for up to 2 days.",
       ] },
       { h: "Who the app talks to", p: [
         "VK servers (api.vk.com, id.vk.com, login.vk.com and VK music servers) to show and play your music. VK's own privacy policy applies to data processed by VK.",
         "GitHub (api.github.com) only to check for and download updates. GitHub receives no information about your VK account.",
         "Music plays through a tiny local server on 127.0.0.1 that is reachable only from your computer.",
+        "The Melo server, for sign-in and sync. It runs on Cloudflare infrastructure; data may be stored outside your country.",
+        "Cloudflare Turnstile for the robot check on email sign-in, Resend to deliver the code email, and Google only if you choose Google sign-in.",
       ] },
       { h: "Your control", p: [
         "Sign out from the profile menu or Settings and the token is removed from your computer. Deleting Melo's data folder removes everything the app stored.",
         "You can also revoke access in VK security settings (apps and active sessions).",
+        "In Settings → Melo account you can clear your listening history, sign out everywhere or delete your Melo account — all related data is then removed from the server immediately.",
       ] },
       { h: "Children", p: ["Melo is not designed to collect children's data and does not collect it. Age limits for VK are set by VK's rules."] },
       { h: "Contact", p: ["Questions and bug reports: Issues on github.com/wtf40iq/Melo."] },

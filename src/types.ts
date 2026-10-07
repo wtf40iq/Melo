@@ -25,6 +25,10 @@ export type Playlist = {
   count: number;
   cover?: string;
   editable?: boolean;
+  /** Плейлист Melo (хранится в облаке, а не в ВК) */
+  cloud?: boolean;
+  /** Публичная ссылка на плейлист Melo, если включена */
+  shareSlug?: string | null;
 };
 
 export type Profile = { id: number; name: string; photo?: string };

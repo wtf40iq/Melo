@@ -20,7 +20,11 @@ type LibraryState = {
   reloadPlaylists: () => void;
   isMine: (t: Track) => boolean;
   toggleMine: (t: Track) => Promise<void>;
-  createPlaylist: (title: string) => Promise<Playlist | null>;
+  createPlaylist: (title: string, cloud?: boolean) => Promise<Playlist | null>;
+  /** Импорт плейлиста Melo по публичной ссылке */
+  importPlaylist: (link: string) => Promise<Playlist | null>;
+  /** Включить/выключить публичную ссылку на плейлист Melo */
+  sharePlaylist: (pl: Playlist, enabled: boolean) => Promise<Playlist | null>;
   deletePlaylist: (pl: Playlist) => Promise<boolean>;
   renamePlaylist: (pl: Playlist, title: string) => Promise<boolean>;
   /** Перенести трек в «Моей музыке» с позиции from на позицию to (навсегда, через ВК). */
@@ -236,9 +240,29 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     reloadPlaylists,
     isMine,
     toggleMine,
-    createPlaylist: async (title) => {
+    importPlaylist: async (link) => {
       try {
-        const p = await api.createPlaylist(title);
+        const p = await api.importCloudPlaylist(link);
+        setPlaylists((prev) => [p, ...prev]);
+        return p;
+      } catch (e) {
+        fail(e);
+        return null;
+      }
+    },
+    sharePlaylist: async (pl, enabled) => {
+      try {
+        const p = await api.shareCloudPlaylist(pl, enabled);
+        setPlaylists((prev) => prev.map((x) => (x.id === p.id ? p : x)));
+        return p;
+      } catch (e) {
+        fail(e);
+        return null;
+      }
+    },
+    createPlaylist: async (title, cloud) => {
+      try {
+        const p = cloud ? await api.createCloudPlaylist(title) : await api.createPlaylist(title);
         setPlaylists((prev) => [p, ...prev]);
         return p;
       } catch (e) {

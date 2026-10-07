@@ -14,7 +14,7 @@ type Phase = "loading" | "waiting" | "scanned" | "code" | "expired" | "error" | 
 
 const CODE_LEN = 6;
 
-export function Login() {
+export function Login({ onBack, note }: { onBack?: () => void; note?: string } = {}) {
   const lib = useLibrary();
   const t = useT();
   const [busy, setBusy] = useState(false);
@@ -149,6 +149,11 @@ export function Login() {
     <div className="login">
       <div className="login-card wide-card">
         <div className="login-side">
+          {onBack && lib.returnTo == null && (
+            <button className="link-btn back-link" onClick={onBack}>
+              <ArrowLeft size={14} /> {t("Другие способы входа")}
+            </button>
+          )}
           {lib.returnTo != null && (
             <button className="link-btn back-link" onClick={() => lib.cancelAdd()}>
               <ArrowLeft size={14} /> {t("Вернуться к текущему аккаунту")}
@@ -157,6 +162,7 @@ export function Login() {
           <Logo size={64} className="big" />
           <h1>{lib.returnTo != null ? t("Ещё один аккаунт") : "Melo"}</h1>
           <p>{t("Ваша музыка из ВКонтакте — без рекламы и лишнего.")}</p>
+          {note && <div className="auth-note">{t(note)}</div>}
 
           <ol className="login-steps">
             <li><Smartphone size={16} /> {t("Откройте камеру или приложение ВК на телефоне")}</li>
