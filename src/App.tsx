@@ -142,7 +142,12 @@ function Shell() {
   // 2. Музыка пока берётся из ВК — нужен вход в ВК
   if (!lib.profile) {
     const viaVk = acc.user?.identities.some((i) => i.provider === "vk");
-    return loggedOut(<Login note={acc.user && !viaVk ? "Аккаунт Melo готов. Теперь подключите ВКонтакте — музыка берётся оттуда." : undefined} />);
+    return loggedOut(
+      <Login
+        note={acc.user && !viaVk ? "Аккаунт Melo готов. Теперь подключите ВКонтакте — музыка берётся оттуда." : undefined}
+        account={acc.user ? { name: acc.user.name || acc.user.identities[0]?.label || "Melo", onLogout: () => acc.logout() } : undefined}
+      />,
+    );
   }
 
   const page = () => {

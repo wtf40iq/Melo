@@ -14,7 +14,7 @@ type Phase = "loading" | "waiting" | "scanned" | "code" | "expired" | "error" | 
 
 const CODE_LEN = 6;
 
-export function Login({ onBack, note }: { onBack?: () => void; note?: string } = {}) {
+export function Login({ onBack, note, account }: { onBack?: () => void; note?: string; account?: { name: string; onLogout: () => void } } = {}) {
   const lib = useLibrary();
   const t = useT();
   const [busy, setBusy] = useState(false);
@@ -177,7 +177,7 @@ export function Login({ onBack, note }: { onBack?: () => void; note?: string } =
             onClick={async () => { setBusy(true); await lib.login(); setBusy(false); }}
           >
             {busy ? <Loader2 size={18} className="spin" /> : <Globe size={18} />}
-            {t(busy ? "Ждём вход в окне ВК…" : "Войти по логину и паролю")}
+            {t(busy ? "Ждём вход в окне ВК…" : "Войти через страницу ВК")}
           </button>
           <label className={`terms-check ${agreed ? "on" : ""}`}>
             <input type="checkbox" checked={agreed} onChange={(e) => agree(e.target.checked)} />
@@ -193,6 +193,12 @@ export function Login({ onBack, note }: { onBack?: () => void; note?: string } =
           <small>
             {t(api.demo ? "Сейчас открыт демо-режим: данные ненастоящие." : "Вход идёт на официальной странице ВК. Пароль приложение не видит.")}
           </small>
+          {account && (
+            <small className="login-account">
+              {t("Аккаунт Melo: {name}", { name: account.name })} ·{" "}
+              <button type="button" className="link-inline" onClick={account.onLogout}>{t("Выйти из Melo")}</button>
+            </small>
+          )}
         </div>
 
         <div className="qr-box">

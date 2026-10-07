@@ -3,18 +3,30 @@ import { createPortal } from "react-dom";
 import { useState } from "react";
 import { Check, Copy, Download, KeyRound } from "lucide-react";
 import { useT } from "../store/settings";
+import { inTauri } from "../api/env";
 
 export function RecoveryCodeDialog({ code, login, onClose }: { code: string; login: string; onClose: () => void }) {
   const t = useT();
   const [saved, setSaved] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [file, setFile] = useState<{ ok: boolean; text: string } | null>(null);
   const copy = async () => {
     await navigator.clipboard.writeText(code).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
-  const download = () => {
+  const download = async () => {
     const text = `Melo — ${t("код восстановления")}\n${t("Логин")}: ${login}\n${code}\n`;
+    if (inTauri) {
+      const { invoke } = await import("@tauri-apps/api/core");
+      try {
+        setFile({ ok: true, text: await invoke<string>("save_text_file", { name: "melo-recovery.txt", text }) });
+        setSaved(true);
+      } catch (e) {
+        setFile({ ok: false, text: `${t("Не удалось сохранить файл")}: ${e}` });
+      }
+      return;
+    }
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
     a.download = "melo-recovery.txt";
@@ -32,6 +44,7 @@ export function RecoveryCodeDialog({ code, login, onClose }: { code: string; log
           <button className="btn secondary sm-btn" onClick={copy}>{copied ? <Check size={14} /> : <Copy size={14} />} {t(copied ? "Скопировано" : "Копировать")}</button>
           <button className="btn secondary sm-btn" onClick={download}><Download size={14} /> {t("Сохранить в файл")}</button>
         </div>
+        {file && <small className={`recovery-file ${file.ok ? "" : "bad"}`}>{file.ok ? t("Сохранено: {path}", { path: file.text }) : file.text}</small>}
         <label className={`terms-check ${saved ? "on" : ""}`}>
           <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
           <span className="terms-box">{saved && <Check size={13} strokeWidth={3} />}</span>

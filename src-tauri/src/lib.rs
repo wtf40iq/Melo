@@ -435,6 +435,47 @@ fn melo_session_set(app: AppHandle, value: Option<Value>) {
     }
 }
 
+/// Сохранить текстовый файл (код восстановления) в «Загрузки» и показать его в проводнике.
+/// Возвращает полный путь к файлу.
+#[tauri::command]
+fn save_text_file(app: AppHandle, name: String, text: String) -> Result<String, String> {
+    let safe: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(60)
+        .collect();
+    let safe = if safe.is_empty() || safe.starts_with('.') { "melo.txt".to_string() } else { safe };
+    let dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().desktop_dir())
+        .or_else(|_| app.path().home_dir())
+        .map_err(|e| e.to_string())?;
+    let _ = fs::create_dir_all(&dir);
+    let (stem, ext) = match safe.rsplit_once('.') {
+        Some((a, b)) => (a.to_string(), format!(".{b}")),
+        None => (safe.clone(), String::new()),
+    };
+    let mut path = dir.join(&safe);
+    let mut n = 1;
+    while path.exists() && n < 100 {
+        path = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    // В Windows блокнот лучше понимает CRLF
+    fs::write(&path, text.replace("\r\n", "\n").replace('\n', "\r\n")).map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let _ = std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+    }
+    Ok(path.display().to_string())
+}
+
 /// Открыть https-ссылку в браузере по умолчанию (вход через Google).
 #[tauri::command]
 fn open_url(url: String) -> Result<(), String> {
@@ -1083,7 +1124,8 @@ pub fn run() {
                 responder.respond(proxy(app, request).await);
             });
         })
-        .invoke_handler(tauri::generate_handler![vk_login, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install, vk_proof, melo_session_get, melo_session_set, open_url])
+        .invoke_handler(tauri::generate_handler![vk_login, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install, vk_proof, melo_session_get, melo_session_set, open_url,
+            save_text_file])
         .run(tauri::generate_context!())
         .expect("ошибка при запуске приложения");
 }

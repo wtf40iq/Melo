@@ -202,13 +202,15 @@ async function checkTurnstile(env: Env, req: Request, token: string) {
 
 function turnstilePage(env: Env, lang: string) {
   const key = env.TURNSTILE_SITE_KEY || "";
-  return html(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<style>html,body{margin:0;background:transparent;display:flex;justify-content:center;align-items:center;min-height:100%;overflow:hidden}</style>
+  return html(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="color-scheme" content="dark">
+<style>:root{color-scheme:dark}html,body{margin:0;background:transparent;display:flex;justify-content:center;align-items:center;min-height:100%;overflow:hidden}</style>
 <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=ready&render=explicit" async defer></script>
 <script>
 function send(m){parent.postMessage(Object.assign({source:"melo-turnstile"},m),"*")}
 function ready(){turnstile.render("#w",{sitekey:${JSON.stringify(key)},theme:"dark",language:${JSON.stringify(lang === "en" ? "en" : "ru")},
- callback:function(t){send({token:t})},"expired-callback":function(){send({token:""})},"error-callback":function(){send({error:true})}})}
+ appearance:"interaction-only",size:"flexible",
+ "before-interactive-callback":function(){send({show:true})},"after-interactive-callback":function(){send({show:false})},
+ callback:function(t){send({token:t})},"expired-callback":function(){send({token:""})},"error-callback":function(){send({error:true,show:true})}})}
 addEventListener("message",function(e){if(e.data==="melo-turnstile-reset"&&window.turnstile)turnstile.reset("#w")});
 </script></head><body><div id="w"></div></body></html>`);
 }

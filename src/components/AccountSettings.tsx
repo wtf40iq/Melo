@@ -42,20 +42,55 @@ function PasswordForm({ mode, onDone }: { mode: PwPanel; onDone: (msg: string) =
     setReset((n) => n + 1);
     if (ok) onDone(mode === "link" ? "Логин и пароль добавлены" : mode === "change" ? "Пароль изменён" : "");
   };
+  const title = mode === "link" ? "Вход по логину и паролю" : mode === "change" ? "Смена пароля" : "Новый код восстановления";
+  const desc =
+    mode === "link" ? "Придумайте логин и пароль — по ним можно войти в Melo, даже если нет доступа к ВК."
+    : mode === "change" ? "Другие устройства выйдут из аккаунта."
+    : "Старый код перестанет работать. Подтвердите паролем.";
+  const mismatch = needNew && pw2 && pw !== pw2;
   return (
-    <form className="acc-link-form col" onSubmit={submit}>
-      {mode === "link" && <input className="auth-input" autoFocus autoComplete="username" maxLength={32} placeholder={t("Логин")} value={login} onChange={(e) => setLogin(e.target.value.replace(/\s/g, ""))} />}
-      {mode !== "link" && <input className="auth-input" type="password" autoFocus autoComplete="current-password" maxLength={128} placeholder={t("Текущий пароль")} value={old} onChange={(e) => setOld(e.target.value)} />}
-      {needNew && (
-        <>
-          <input className="auth-input" type="password" autoComplete="new-password" maxLength={128} placeholder={t("Новый пароль (от 8 символов)")} value={pw} onChange={(e) => setPw(e.target.value)} />
-          <input className="auth-input" type="password" autoComplete="new-password" maxLength={128} placeholder={t("Повторите пароль")} value={pw2} onChange={(e) => setPw2(e.target.value)} />
-        </>
+    <form className="acc-panel" onSubmit={submit}>
+      <div className="acc-panel-head">
+        <span className="acc-panel-icon"><KeyRound size={18} /></span>
+        <span>
+          <b>{t(title)}</b>
+          <small>{t(desc)}</small>
+        </span>
+      </div>
+      {mode === "link" && (
+        <label className="acc-field">
+          <span>{t("Логин")}</span>
+          <input className="auth-input" autoFocus autoComplete="username" maxLength={32} placeholder="melo_fan" value={login}
+            onChange={(e) => setLogin(e.target.value.replace(/\s/g, ""))} />
+          <small>{t("3–32 символа: латиница, цифры, точка или _")}</small>
+        </label>
       )}
+      {mode !== "link" && (
+        <label className="acc-field">
+          <span>{t("Текущий пароль")}</span>
+          <input className="auth-input" type="password" autoFocus autoComplete="current-password" maxLength={128} value={old} onChange={(e) => setOld(e.target.value)} />
+        </label>
+      )}
+      {needNew && (
+        <div className="acc-field-row">
+          <label className="acc-field">
+            <span>{t("Новый пароль")}</span>
+            <input className="auth-input" type="password" autoComplete="new-password" maxLength={128} placeholder={t("от 8 символов")} value={pw} onChange={(e) => setPw(e.target.value)} />
+          </label>
+          <label className="acc-field">
+            <span>{t("Повторите пароль")}</span>
+            <input className={`auth-input ${mismatch ? "bad" : ""}`} type="password" autoComplete="new-password" maxLength={128} value={pw2} onChange={(e) => setPw2(e.target.value)} />
+          </label>
+        </div>
+      )}
+      {mismatch && <small className="acc-warn">{t("Пароли не совпадают")}</small>}
       {mode === "link" && acc.config?.captcha && <Captcha lang={lang} onToken={onToken} resetKey={reset} />}
-      <button className="btn primary sm-btn" disabled={busy || !ready}>
-        {busy && <Loader2 size={14} className="spin" />} {t(mode === "link" ? "Добавить" : mode === "change" ? "Сменить пароль" : "Показать новый код")}
-      </button>
+      <div className="row-gap">
+        <button className="btn primary sm-btn" disabled={busy || !ready}>
+          {busy && <Loader2 size={14} className="spin" />} {t(mode === "link" ? "Добавить" : mode === "change" ? "Сменить пароль" : "Показать новый код")}
+        </button>
+        <button type="button" className="btn secondary sm-btn" onClick={() => onDone("")}>{t("Отмена")}</button>
+      </div>
     </form>
   );
 }
