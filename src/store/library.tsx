@@ -20,11 +20,7 @@ type LibraryState = {
   reloadPlaylists: () => void;
   isMine: (t: Track) => boolean;
   toggleMine: (t: Track) => Promise<void>;
-  createPlaylist: (title: string, cloud?: boolean) => Promise<Playlist | null>;
-  /** Импорт плейлиста Melo по публичной ссылке */
-  importPlaylist: (link: string) => Promise<Playlist | null>;
-  /** Включить/выключить публичную ссылку на плейлист Melo */
-  sharePlaylist: (pl: Playlist, enabled: boolean) => Promise<Playlist | null>;
+  createPlaylist: (title: string) => Promise<Playlist | null>;
   deletePlaylist: (pl: Playlist) => Promise<boolean>;
   renamePlaylist: (pl: Playlist, title: string) => Promise<boolean>;
   /** Перенести трек в «Моей музыке» с позиции from на позицию to (навсегда, через ВК). */
@@ -42,6 +38,20 @@ type LibraryState = {
 
 const Ctx = createContext<LibraryState | null>(null);
 const PAGE = 200;
+
+/** Почему ВК завершил сессию — показываем на экране входа. */
+export function rememberVkKick(e: string) {
+  const msg = e.replace(/^.*not_authorized:?\s*/, "").trim();
+  localStorage.setItem("melo.vkKick", JSON.stringify({ at: Date.now(), msg }));
+}
+export function lastVkKick(): string | null {
+  try {
+    const k = JSON.parse(localStorage.getItem("melo.vkKick") || "null");
+    return k && Date.now() - k.at < 3 * 86400_000 ? k.msg || "" : null;
+  } catch {
+    return null;
+  }
+}
 
 export function LibraryProvider({ children }: { children: ReactNode }) {
   const { toast } = useUi();
@@ -61,7 +71,10 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   const fail = useCallback(
     (e: unknown) => {
       toast(errorText(e));
-      if (String(e).includes("not_authorized")) setProfile(null);
+      if (String(e).includes("not_authorized")) {
+        rememberVkKick(String(e));
+        setProfile(null);
+      }
     },
     [toast],
   );
@@ -98,6 +111,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     reloadAccounts();
     if (!profile) return;
+    localStorage.removeItem("melo.vkKick");
     setReturnTo(null);
     setTracks([]);
     setTotal(0);
@@ -240,29 +254,9 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     reloadPlaylists,
     isMine,
     toggleMine,
-    importPlaylist: async (link) => {
+    createPlaylist: async (title) => {
       try {
-        const p = await api.importCloudPlaylist(link);
-        setPlaylists((prev) => [p, ...prev]);
-        return p;
-      } catch (e) {
-        fail(e);
-        return null;
-      }
-    },
-    sharePlaylist: async (pl, enabled) => {
-      try {
-        const p = await api.shareCloudPlaylist(pl, enabled);
-        setPlaylists((prev) => prev.map((x) => (x.id === p.id ? p : x)));
-        return p;
-      } catch (e) {
-        fail(e);
-        return null;
-      }
-    },
-    createPlaylist: async (title, cloud) => {
-      try {
-        const p = cloud ? await api.createCloudPlaylist(title) : await api.createPlaylist(title);
+        const p = await api.createPlaylist(title);
         setPlaylists((prev) => [p, ...prev]);
         return p;
       } catch (e) {

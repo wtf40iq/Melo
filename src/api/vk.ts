@@ -80,8 +80,15 @@ export const vkApi: MusicApi = {
     try {
       return await loadProfile();
     } catch (e) {
-      if (String(e).includes("not_authorized")) return null;
-      throw e;
+      if (String(e).includes("not_authorized")) {
+        localStorage.setItem("melo.vkKick", JSON.stringify({ at: Date.now(), msg: String(e).replace(/^.*not_authorized:?\s*/, "").trim() }));
+        return null;
+      }
+      // Нет сети, ВК тормозит или просит подождать — это не выход из аккаунта.
+      // Открываем приложение с сохранённым профилем, а данные подтянутся позже.
+      const acc = (await invoke<Account[]>("accounts_list").catch(() => [] as Account[])).find((a) => a.user_id === uid);
+      me = { id: uid, name: acc?.name || `id${uid}`, photo: acc?.photo };
+      return me;
     }
   },
 

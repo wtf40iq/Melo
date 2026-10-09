@@ -5,6 +5,7 @@ import { useLibrary } from "../store/library";
 import { usePlayer } from "../store/player";
 import { Route, useUi } from "../store/ui";
 import { Cover } from "./Cover";
+import { Dialog } from "./Dialog";
 
 const nav = [
   { name: "home", label: "Главная", icon: Home },
@@ -24,6 +25,7 @@ function Avatar({ photo, name, size = 32 }: { photo?: string; name?: string; siz
 export function Sidebar() {
   const ui = useUi();
   const lib = useLibrary();
+  const [confirmOut, setConfirmOut] = useState(false);
   const p = usePlayer();
   const { t, sideCover } = useSettings();
   const [menu, setMenu] = useState(false);
@@ -100,10 +102,15 @@ export function Sidebar() {
             <button onClick={() => { setMenu(false); lib.addAccount(); }}><UserPlus size={16} /> {t("Добавить аккаунт")}</button>
             <div className="menu-sep" />
             <button onClick={() => { setMenu(false); ui.navigate({ name: "settings" }); }}><Settings size={16} /> {t("Настройки")}</button>
-            <button onClick={() => { setMenu(false); lib.logout(); }}><LogOut size={16} /> {t("Выйти из аккаунта")}</button>
+            <button onClick={() => { setMenu(false); setConfirmOut(true); }}><LogOut size={16} /> {t("Выйти из аккаунта")}</button>
           </div>
         )}
       </div>
+      {confirmOut && (
+        <Dialog title="Выйти из аккаунта ВКонтакте?" text={t("Музыка и плейлисты ВК будут недоступны, пока вы снова не войдёте через QR-код или страницу ВК.")} danger confirm="Выйти"
+          icon={<LogOut size={22} />} onClose={() => setConfirmOut(false)}
+          onConfirm={async () => { setConfirmOut(false); await lib.logout(); }} />
+      )}
     </aside>
   );
 }

@@ -6,7 +6,7 @@ import { LegalDialog } from "../components/LegalDialog";
 import { createQR } from "@vkontakte/vk-qr";
 import { api } from "../api";
 import { QrCode } from "../api/types";
-import { useLibrary } from "../store/library";
+import { lastVkKick, useLibrary } from "../store/library";
 import { useT } from "../store/settings";
 import { errorText } from "../store/ui";
 
@@ -14,8 +14,9 @@ type Phase = "loading" | "waiting" | "scanned" | "code" | "expired" | "error" | 
 
 const CODE_LEN = 6;
 
-export function Login({ onBack, note, account }: { onBack?: () => void; note?: string; account?: { name: string; onLogout: () => void } } = {}) {
+export function Login() {
   const lib = useLibrary();
+  const [kick] = useState(lastVkKick);
   const t = useT();
   const [busy, setBusy] = useState(false);
   const [phase, setPhase] = useState<Phase>("loading");
@@ -149,11 +150,6 @@ export function Login({ onBack, note, account }: { onBack?: () => void; note?: s
     <div className="login">
       <div className="login-card wide-card">
         <div className="login-side">
-          {onBack && lib.returnTo == null && (
-            <button className="link-btn back-link" onClick={onBack}>
-              <ArrowLeft size={14} /> {t("Другие способы входа")}
-            </button>
-          )}
           {lib.returnTo != null && (
             <button className="link-btn back-link" onClick={() => lib.cancelAdd()}>
               <ArrowLeft size={14} /> {t("Вернуться к текущему аккаунту")}
@@ -162,7 +158,9 @@ export function Login({ onBack, note, account }: { onBack?: () => void; note?: s
           <Logo size={64} className="big" />
           <h1>{lib.returnTo != null ? t("Ещё один аккаунт") : "Melo"}</h1>
           <p>{t("Ваша музыка из ВКонтакте — без рекламы и лишнего.")}</p>
-          {note && <div className="auth-note">{t(note)}</div>}
+          {kick != null && (
+            <div className="login-kick">{t("ВКонтакте завершил сессию — войдите снова.")}{kick && <small>{kick}</small>}</div>
+          )}
 
           <ol className="login-steps">
             <li><Smartphone size={16} /> {t("Откройте камеру или приложение ВК на телефоне")}</li>
@@ -177,7 +175,7 @@ export function Login({ onBack, note, account }: { onBack?: () => void; note?: s
             onClick={async () => { setBusy(true); await lib.login(); setBusy(false); }}
           >
             {busy ? <Loader2 size={18} className="spin" /> : <Globe size={18} />}
-            {t(busy ? "Ждём вход в окне ВК…" : "Войти через страницу ВК")}
+            {t(busy ? "Ждём вход в окне ВК…" : "Войти по логину и паролю")}
           </button>
           <label className={`terms-check ${agreed ? "on" : ""}`}>
             <input type="checkbox" checked={agreed} onChange={(e) => agree(e.target.checked)} />
@@ -193,12 +191,6 @@ export function Login({ onBack, note, account }: { onBack?: () => void; note?: s
           <small>
             {t(api.demo ? "Сейчас открыт демо-режим: данные ненастоящие." : "Вход идёт на официальной странице ВК. Пароль приложение не видит.")}
           </small>
-          {account && (
-            <small className="login-account">
-              {t("Аккаунт Melo: {name}", { name: account.name })} ·{" "}
-              <button type="button" className="link-inline" onClick={account.onLogout}>{t("Выйти из Melo")}</button>
-            </small>
-          )}
         </div>
 
         <div className="qr-box">

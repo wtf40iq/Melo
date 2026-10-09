@@ -9,7 +9,7 @@ import { useLibrary } from "../store/library";
 import { ACCENTS, useSettings } from "../store/settings";
 import { useUpdate } from "../store/update";
 import { LegalDialog } from "../components/LegalDialog";
-import { AccountSettings } from "../components/AccountSettings";
+import { Dialog } from "../components/Dialog";
 
 const freqLabel = (f: number) => (f >= 1000 ? `${f / 1000}k` : String(f));
 
@@ -63,6 +63,7 @@ export function Settings() {
   const ui = useUi();
   const upd = useUpdate();
   const [doc, setDoc] = useState<"terms" | "privacy" | null>(null);
+  const [confirmOut, setConfirmOut] = useState(false);
   const t = s.t;
   const [info, setInfo] = useState<AppInfo | null>(null);
   useEffect(() => {
@@ -262,8 +263,6 @@ export function Settings() {
         </Row>
       </section>
 
-      <AccountSettings />
-
       <section className="set-card">
         <h3>{t("Аккаунты ВКонтакте")}</h3>
         <div className="acc-list">
@@ -278,7 +277,7 @@ export function Settings() {
                 <button className="btn secondary sm-btn" onClick={() => lib.switchAccount(a.user_id)}>{t("Переключиться")}</button>
               )}
               {a.active ? (
-                <button className="btn secondary sm-btn" onClick={lib.logout}><LogOut size={15} /> {t("Выйти")}</button>
+                <button className="btn secondary sm-btn" onClick={() => setConfirmOut(true)}><LogOut size={15} /> {t("Выйти")}</button>
               ) : (
                 <button className="icon-btn sm" onClick={() => lib.removeAccount(a.user_id)} aria-label={t("Убрать аккаунт")} title={t("Убрать аккаунт")}>
                   <X size={16} />
@@ -342,7 +341,12 @@ export function Settings() {
         <button className="btn secondary sm-btn self-start" onClick={() => setDoc("terms")}>
           <FileText size={15} /> {t("Соглашение и конфиденциальность")}
         </button>
-        {doc && <LegalDialog doc={doc} onClose={() => setDoc(null)} />}
+        {confirmOut && (
+        <Dialog title="Выйти из аккаунта ВКонтакте?" text={t("Музыка и плейлисты ВК будут недоступны, пока вы снова не войдёте через QR-код или страницу ВК.")} danger confirm="Выйти"
+          icon={<LogOut size={22} />} onClose={() => setConfirmOut(false)}
+          onConfirm={async () => { setConfirmOut(false); await lib.logout(); }} />
+      )}
+      {doc && <LegalDialog doc={doc} onClose={() => setDoc(null)} />}
         <button className="btn secondary sm-btn self-start" onClick={() => window.dispatchEvent(new Event("melo:welcome"))}>
           <Sparkles size={15} /> {t("Показать приветствие")}
         </button>

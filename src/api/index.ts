@@ -1,7 +1,5 @@
 import { demoApi } from "./demo";
 import { vkApi } from "./vk";
-import { withCloud } from "./cloud";
-import { inTauri } from "./env";
 
-export { inTauri };
-export const api = withCloud(inTauri ? vkApi : demoApi);
+export const inTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+export const api = inTauri ? vkApi : demoApi;

@@ -17,6 +17,7 @@ use tauri::{
 
 /// Публичный client_id Kate Mobile — вход через окно браузера.
 const CLIENT_ID: &str = "2685278";
+const WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const KATE_UA: &str =
     "KateMobileAndroid/109.1 lite-550 (Android 13; SDK 33; arm64-v8a; Google Pixel 5; ru)";
 /// Официальное приложение VK для Android — только оно разрешает вход по QR-коду.
@@ -45,7 +46,12 @@ struct Session {
 
 impl Session {
     fn user_agent(&self) -> &'static str {
-        if self.client == "vk_android" { VKA_UA } else { KATE_UA }
+        // Запросы должны выглядеть так же, как клиент, выдавший ключ, — иначе ВК может его отозвать
+        match self.client.as_str() {
+            "vk_android" => VKA_UA,
+            "vk_web" => WEB_UA,
+            _ => KATE_UA,
+        }
     }
 }
 
@@ -81,11 +87,16 @@ struct Accounts {
     accounts: Vec<Session>,
 }
 
-fn load_accounts(app: &AppHandle) -> Accounts {
-    if let Some(acc) = data_path(app, "accounts.json")
+fn read_accounts(app: &AppHandle, name: &str) -> Option<Accounts> {
+    data_path(app, name)
         .and_then(|p| fs::read(p).ok())
         .and_then(|d| serde_json::from_slice::<Accounts>(&d).ok())
-    {
+}
+
+fn load_accounts(app: &AppHandle) -> Accounts {
+    // Основной файл, а если он повреждён (например, компьютер выключился во время записи) —
+    // резервная копия. Так вход не теряется из-за сбоя записи.
+    if let Some(acc) = read_accounts(app, "accounts.json").or_else(|| read_accounts(app, "accounts.json.bak")) {
         return acc;
     }
     // Переезд со старого формата (один аккаунт в session.json)
@@ -103,7 +114,20 @@ fn store_accounts(app: &AppHandle, acc: &Accounts) {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    let _ = fs::write(&path, serde_json::to_vec_pretty(acc).unwrap_or_default());
+    let data = serde_json::to_vec_pretty(acc).unwrap_or_default();
+    // Атомарная запись: сначала во временный файл, потом замена. Прошлую версию храним как .bak
+    let tmp = path.with_extension("json.tmp");
+    if fs::write(&tmp, &data).is_ok() {
+        if path.exists() {
+            let _ = fs::copy(&path, path.with_extension("json.bak"));
+        }
+        if fs::rename(&tmp, &path).is_err() {
+            let _ = fs::write(&path, &data);
+            let _ = fs::remove_file(&tmp);
+        }
+    } else {
+        let _ = fs::write(&path, &data);
+    }
     if let Some(old) = data_path(app, "session.json") {
         let _ = fs::remove_file(old);
     }
@@ -360,7 +384,7 @@ async fn vk_call(
             (k, v)
         })
         .collect();
-    form.push(("access_token".into(), token));
+    form.push(("access_token".into(), token.clone()));
     form.push(("v".into(), API_VERSION.into()));
     if !form.iter().any(|(k, _)| k == "lang") {
         form.push(("lang".into(), "ru".into()));
@@ -382,122 +406,49 @@ async fn vk_call(
         let code = err["error_code"].as_i64().unwrap_or(0);
         let msg = err["error_msg"].as_str().unwrap_or("Ошибка ВКонтакте");
         if code == 5 {
-            *state.session.lock().unwrap() = None;
-            save_session(&app, None);
-            return Err("not_authorized".into());
+            // Не выкидываем из аккаунта из-за случайного сбоя: ВК иногда отвечает «ошибкой
+            // авторизации» на секунду (перегрузка, смена IP/VPN). Перепроверяем ключ через паузу.
+            let lower = msg.to_lowercase();
+            if lower.contains("another ip") || lower.contains("ip address") {
+                return Err(format!("ВК не принял ключ с этого IP — выключите или смените VPN ({msg})"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            if token_alive(&state, &token, &ua).await != Some(false) {
+                return Err(format!("ВК временно не ответил, попробуйте ещё раз ({msg})"));
+            }
+            // Ключ действительно отозван (вышли на всех устройствах, сменили пароль и т. п.)
+            let still_same = state.session.lock().unwrap().as_ref().map(|s| s.token == token).unwrap_or(false);
+            if still_same {
+                *state.session.lock().unwrap() = None;
+                save_session(&app, None);
+            }
+            return Err(format!("not_authorized: {msg}"));
         }
         return Err(format!("{msg} (код {code})"));
     }
     Ok(res.get("response").cloned().unwrap_or(Value::Null))
 }
 
-// ---------- Аккаунт Melo ----------
-
-/// Токен активного аккаунта ВК — только чтобы сервер Melo один раз проверил,
-/// чей это аккаунт (users.get). Сервер токен не сохраняет.
-#[derive(Serialize)]
-struct VkProof {
-    token: String,
-    client: String,
-}
-
-#[tauri::command]
-fn vk_proof(state: State<'_, AppState>) -> Option<VkProof> {
-    state
-        .session
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|s| VkProof { token: s.token.clone(), client: s.client.clone() })
-}
-
-/// Сессия Melo (токен и профиль) хранится в папке данных приложения, как и аккаунты ВК.
-#[tauri::command]
-fn melo_session_get(app: AppHandle) -> Option<Value> {
-    data_path(&app, "melo.json")
-        .and_then(|p| fs::read(p).ok())
-        .and_then(|d| serde_json::from_slice(&d).ok())
-}
-
-#[tauri::command]
-fn melo_session_set(app: AppHandle, value: Option<Value>) {
-    let Some(path) = data_path(&app, "melo.json") else { return };
-    match value {
-        Some(v) => {
-            if let Some(dir) = path.parent() {
-                let _ = fs::create_dir_all(dir);
-            }
-            let _ = fs::write(&path, serde_json::to_vec(&v).unwrap_or_default());
-        }
-        None => {
-            let _ = fs::remove_file(path);
-        }
+/// Жив ли ключ ВК: Some(true) — да, Some(false) — точно отозван, None — не удалось проверить.
+async fn token_alive(state: &AppState, token: &str, ua: &str) -> Option<bool> {
+    let res: Value = state
+        .http
+        .post("https://api.vk.com/method/users.get")
+        .header("User-Agent", ua)
+        .form(&[("access_token", token), ("v", API_VERSION)])
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    if res.get("response").is_some() {
+        return Some(true);
     }
-}
-
-/// Сохранить текстовый файл (код восстановления) в «Загрузки» и показать его в проводнике.
-/// Возвращает полный путь к файлу.
-#[tauri::command]
-fn save_text_file(app: AppHandle, name: String, text: String) -> Result<String, String> {
-    let safe: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
-        .take(60)
-        .collect();
-    let safe = if safe.is_empty() || safe.starts_with('.') { "melo.txt".to_string() } else { safe };
-    let dir = app
-        .path()
-        .download_dir()
-        .or_else(|_| app.path().desktop_dir())
-        .or_else(|_| app.path().home_dir())
-        .map_err(|e| e.to_string())?;
-    let _ = fs::create_dir_all(&dir);
-    let (stem, ext) = match safe.rsplit_once('.') {
-        Some((a, b)) => (a.to_string(), format!(".{b}")),
-        None => (safe.clone(), String::new()),
-    };
-    let mut path = dir.join(&safe);
-    let mut n = 1;
-    while path.exists() && n < 100 {
-        path = dir.join(format!("{stem} ({n}){ext}"));
-        n += 1;
+    match res["error"]["error_code"].as_i64() {
+        Some(5) => Some(false),
+        _ => None,
     }
-    // В Windows блокнот лучше понимает CRLF
-    fs::write(&path, text.replace("\r\n", "\n").replace('\n', "\r\n")).map_err(|e| e.to_string())?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("explorer")
-            .raw_arg(format!("/select,\"{}\"", path.display()))
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
-    }
-    Ok(path.display().to_string())
-}
-
-/// Открыть https-ссылку в браузере по умолчанию (вход через Google).
-#[tauri::command]
-fn open_url(url: String) -> Result<(), String> {
-    let u = Url::parse(&url).map_err(|_| "Неверная ссылка".to_string())?;
-    if u.scheme() != "https" {
-        return Err("Можно открывать только https-ссылки".into());
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", u.as_str()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-    #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(u.as_str()).spawn().map_err(|e| e.to_string())?;
-    #[cfg(all(unix, not(target_os = "macos")))]
-    std::process::Command::new("xdg-open").arg(u.as_str()).spawn().map_err(|e| e.to_string())?;
-    Ok(())
 }
 
 // ---------- Вход по QR-коду ----------
@@ -1124,8 +1075,7 @@ pub fn run() {
                 responder.respond(proxy(app, request).await);
             });
         })
-        .invoke_handler(tauri::generate_handler![vk_login, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install, vk_proof, melo_session_get, melo_session_set, open_url,
-            save_text_file])
+        .invoke_handler(tauri::generate_handler![vk_login, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install])
         .run(tauri::generate_context!())
         .expect("ошибка при запуске приложения");
 }

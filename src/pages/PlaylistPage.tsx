@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { MoreHorizontal, Pencil, Play, Shuffle, Trash2 , Link2, Link2Off} from "lucide-react";
+import { MoreHorizontal, Pencil, Play, Shuffle, Trash2 } from "lucide-react";
 import { api } from "../api";
-import { melo } from "../api/melo";
 import { Cover } from "../components/Cover";
 import { TrackList } from "../components/TrackList";
 import { Empty, Loading } from "../components/Loading";
@@ -74,21 +73,6 @@ export function PlaylistPage({ playlist }: { playlist: Playlist }) {
                 {menu && (
                   <div className="menu pl-menu" role="menu">
                     <button onClick={() => { setMenu(false); setDialog("rename"); }}><Pencil size={16} /> {t("Переименовать")}</button>
-                    {pl.cloud && (
-                      <button onClick={async () => {
-                        setMenu(false);
-                        const p2 = await lib.sharePlaylist(pl, true);
-                        if (p2?.shareSlug) {
-                          await navigator.clipboard?.writeText(melo.shareUrl(p2.shareSlug)).catch(() => {});
-                          ui.toast("Ссылка на плейлист скопирована");
-                        }
-                      }}><Link2 size={16} /> {t(pl.shareSlug ? "Скопировать ссылку" : "Поделиться ссылкой")}</button>
-                    )}
-                    {pl.cloud && pl.shareSlug && (
-                      <button onClick={async () => { setMenu(false); if (await lib.sharePlaylist(pl, false)) ui.toast("Ссылка отключена"); }}>
-                        <Link2Off size={16} /> {t("Отключить ссылку")}
-                      </button>
-                    )}
                     <button className="danger" onClick={() => { setMenu(false); setDialog("delete"); }}><Trash2 size={16} /> {t("Удалить плейлист")}</button>
                   </div>
                 )}
@@ -103,7 +87,7 @@ export function PlaylistPage({ playlist }: { playlist: Playlist }) {
       {dialog === "delete" && (
         <Dialog
           title="Удалить плейлист?"
-          text={t(pl.cloud ? "«{name}» удалится из аккаунта Melo." : "«{name}» удалится из ВКонтакте. Сами треки останутся в «Моей музыке».", { name: pl.title })}
+          text={t("«{name}» удалится из ВКонтакте. Сами треки останутся в «Моей музыке».", { name: pl.title })}
           icon={<Trash2 size={22} />}
           danger
           confirm="Удалить"
