@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Melo",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "identifier": "com.skymywex.melo",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -22,7 +22,8 @@
         "transparent": true,
         "dragDropEnabled": false,
         "label": "main",
-        "shadow": true
+        "shadow": true,
+        "create": false
       }
     ],
     "security": {
@@ -32,14 +33,26 @@
   "bundle": {
     "active": true,
     "targets": [
-      "nsis",
-      "msi"
+      "nsis"
     ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "publisher": "wtf40iq",
+    "shortDescription": "Плеер музыки ВКонтакте",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "Russian",
+          "English"
+        ],
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "installer.nsh"
+      }
+    }
   }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "melo"
-version = "0.9.4"
+version = "0.9.5"
 description = "Лёгкий плеер для музыки ВК"
 edition = "2021"
 

@@ -1850,7 +1850,7 @@ dependencies = [
 
 [[package]]
 name = "melo"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "reqwest 0.12.28",
  "serde",

@@ -76,8 +76,92 @@ struct TrayState {
     playing: bool,
 }
 
-fn data_path(app: &AppHandle, name: &str) -> Option<PathBuf> {
-    app.path().app_data_dir().ok().map(|d| d.join(name))
+/// Папка с данными Melo. Если папка установки доступна на запись — `<папка Melo.exe>\data`
+/// (там же токены ВК и профиль WebView), иначе — старое место в %APPDATA%.
+static DATA_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+const IDENT: &str = "com.skymywex.melo";
+
+fn legacy_roaming() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join(IDENT))
+}
+
+fn legacy_local() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join(IDENT))
+}
+
+fn portable_root() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join("data");
+    fs::create_dir_all(&dir).ok()?;
+    let probe = dir.join(".write-test");
+    fs::write(&probe, b"ok").ok()?;
+    let _ = fs::remove_file(&probe);
+    Some(dir)
+}
+
+fn data_root() -> &'static PathBuf {
+    DATA_ROOT.get_or_init(|| {
+        portable_root()
+            .or_else(|| legacy_roaming())
+            .unwrap_or_else(|| PathBuf::from("."))
+    })
+}
+
+fn is_portable() -> bool {
+    Some(data_root()) != legacy_roaming().as_ref()
+}
+
+fn webview_dir() -> PathBuf {
+    data_root().join("webview")
+}
+
+/// Копирует папку целиком, пропуская кеши (их WebView пересоздаст сам).
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    let Ok(rd) = fs::read_dir(from) else { return };
+    let _ = fs::create_dir_all(to);
+    for e in rd.flatten() {
+        let name = e.file_name();
+        let n = name.to_string_lossy();
+        if matches!(n.as_ref(), "Cache" | "Code Cache" | "GPUCache" | "GrShaderCache" | "ShaderCache" | "DawnCache" | "Crashpad") {
+            continue;
+        }
+        let (src, dst) = (e.path(), to.join(&name));
+        match e.file_type() {
+            Ok(t) if t.is_dir() => copy_dir(&src, &dst),
+            Ok(t) if t.is_file() => { let _ = fs::copy(&src, &dst); }
+            _ => {}
+        }
+    }
+}
+
+/// Первый запуск из папки установки: переносим вход ВК и настройки из старых мест.
+fn migrate_legacy() {
+    if !is_portable() {
+        return;
+    }
+    let root = data_root();
+    let marker = root.join(".migrated");
+    if marker.exists() {
+        return;
+    }
+    if let Some(old) = legacy_roaming() {
+        for f in ["accounts.json", "accounts.json.bak", "session.json"] {
+            let (src, dst) = (old.join(f), root.join(f));
+            if src.exists() && !dst.exists() {
+                let _ = fs::copy(&src, &dst);
+            }
+        }
+    }
+    let wv = webview_dir().join("EBWebView");
+    if !wv.exists() {
+        if let Some(old) = legacy_local().map(|d| d.join("EBWebView")).filter(|d| d.exists()) {
+            copy_dir(&old, &wv);
+        }
+    }
+    let _ = fs::write(&marker, b"1");
+}
+
+fn data_path(_app: &AppHandle, name: &str) -> Option<PathBuf> {
+    Some(data_root().join(name))
 }
 
 /// Все добавленные аккаунты и какой из них активен.
@@ -235,7 +319,7 @@ struct AppInfo {
 fn app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
     AppInfo {
         version: app.package_info().version.to_string(),
-        data_dir: app.path().app_data_dir().map(|d| d.display().to_string()).unwrap_or_default(),
+        data_dir: data_root().display().to_string(),
         stream: state.stream_base.lock().unwrap().split('/').nth(2).unwrap_or_default().to_string(),
         client: state.session.lock().unwrap().as_ref().map(|s| s.client.clone()),
         api_version: API_VERSION.into(),
@@ -294,6 +378,7 @@ async fn vk_login(app: AppHandle, state: State<'_, AppState>) -> Result<i64, Str
         WebviewUrl::External(auth_url.parse().map_err(|_| "bad url")?),
     )
     .title("Вход ВКонтакте")
+    .data_directory(webview_dir())
     .inner_size(520.0, 700.0)
     .center()
     .on_navigation(move |u| match parse_redirect(u) {
@@ -732,6 +817,7 @@ const TRAY_H: f64 = 262.0;
 
 fn create_tray_menu(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     tauri::WebviewWindowBuilder::new(app, "tray-menu", tauri::WebviewUrl::App("index.html#tray".into()))
+        .data_directory(webview_dir())
         .title("Melo")
         .inner_size(TRAY_W, TRAY_H)
         .decorations(false)
@@ -1038,6 +1124,13 @@ pub fn run() {
         .build()
         .expect("http client");
 
+    // Все данные (токены ВК, cookies, настройки) — в папке установки.
+    let _ = fs::create_dir_all(data_root());
+    migrate_legacy();
+    let wv = webview_dir();
+    let _ = fs::create_dir_all(&wv);
+    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &wv);
+
     tauri::Builder::default()
         .manage(AppState { session: Mutex::new(None), http, anon: Mutex::new(None), stream_base: Mutex::new(String::new()), close_to_tray: std::sync::atomic::AtomicBool::new(false), tray: Mutex::new(TrayState::default()) })
         .setup(|app| {
@@ -1045,6 +1138,13 @@ pub fn run() {
             let handle = app.handle().clone();
             let session = load_session(&handle);
             *app.state::<AppState>().session.lock().unwrap() = session;
+            if app.get_webview_window("main").is_none() {
+                if let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() {
+                    WebviewWindowBuilder::from_config(app.handle(), &cfg)?
+                        .data_directory(webview_dir())
+                        .build()?;
+                }
+            }
             setup_tray(app)?;
             if let Some(base) = start_stream_server(handle.clone()) {
                 *app.state::<AppState>().stream_base.lock().unwrap() = base;
