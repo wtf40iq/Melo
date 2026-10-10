@@ -89,7 +89,7 @@
 
 ## 🚀 Установка
 
-1. Скачайте **`Melo.exe`** со страницы [Releases](https://github.com/wtf40iq/Melo/releases/latest).
+1. Скачайте **`Melo-setup-vX.X.X.exe`** со страницы [Releases](https://github.com/wtf40iq/Melo/releases/latest).
 2. Запустите. Установка не нужна.
 3. Войдите по QR-коду из приложения ВКонтакте.
 
