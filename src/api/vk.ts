@@ -143,6 +143,80 @@ const profileAfterLogin = async (uid: number): Promise<Profile> => {
 
 const items = (r: any) => (Array.isArray(r) ? r : r?.items ?? []);
 
+// ---------- Поиск через каталог ВК (как в официальном приложении) ----------
+const CATALOG_V = "5.199";
+type CatalogResult = { tracks: Track[]; playlists: Playlist[]; artists: Artist[] };
+
+/** Собирает объекты из ответа каталога по их id ("owner_id" + "_" + "id"). */
+function catalogPools(r: any) {
+  const audios = new Map<string, any>();
+  for (const a of r?.audios ?? []) audios.set(`${a.owner_id}_${a.id}`, a);
+  const playlists = new Map<string, any>();
+  for (const p of r?.playlists ?? []) playlists.set(`${p.owner_id}_${p.id}`, p);
+  const artists = new Map<string, any>();
+  for (const a of r?.artists ?? []) artists.set(String(a.id), a);
+  return { audios, playlists, artists };
+}
+const idKey = (id: string) => id.split("_").slice(0, 2).join("_");
+
+function catalogSearch(q: string): Promise<CatalogResult> {
+  return cached(`c:${q.trim().toLowerCase()}`, async () => {
+    const r = await call("catalog.getAudioSearch", { query: q.trim(), need_blocks: 1, v: CATALOG_V });
+    const pools = catalogPools(r);
+    const section = r?.catalog?.sections?.find((x: any) => x.id === r?.catalog?.default_section) ?? r?.catalog?.sections?.[0];
+    const blocks: any[] = section?.blocks ?? [];
+    const tracks: Track[] = [];
+    const seen = new Set<string>();
+    const push = (ids: string[] | undefined, pool: Map<string, any>) => {
+      for (const id of ids ?? []) {
+        const a = pool.get(idKey(id));
+        if (!a) continue;
+        const t = mapTrack(a);
+        if (seen.has(t.id)) continue;
+        seen.add(t.id);
+        tracks.push(t);
+      }
+    };
+    const playlists: Playlist[] = [];
+    const artists: Artist[] = [];
+    let more: { section?: string } | null = null;
+    for (const b of blocks) {
+      if (b.data_type === "music_audios" && b.audios_ids?.length) {
+        push(b.audios_ids, pools.audios);
+        // «Показать все» у основного списка треков — там полная выдача
+        const btn = [...(b.buttons ?? []), ...(b.layout?.top_title?.buttons ?? [])].find((x: any) => x.section_id || x.action?.section_id);
+        if (!more && btn) more = { section: btn.section_id ?? btn.action?.section_id };
+      } else if (b.data_type === "music_playlists") {
+        for (const id of b.playlists_ids ?? []) {
+          const p = pools.playlists.get(idKey(id));
+          if (p) playlists.push(mapPlaylist(p, me?.id));
+        }
+      } else if (b.artists_ids?.length) {
+        for (const id of b.artists_ids) {
+          const a = pools.artists.get(String(id));
+          if (a) artists.push(mapArtist(a));
+        }
+      }
+    }
+    if (!artists.length) for (const a of pools.artists.values()) artists.push(mapArtist(a));
+    if (!playlists.length) for (const p of pools.playlists.values()) playlists.push(mapPlaylist(p, me?.id));
+    // Полный список треков: листаем раздел «Показать все»
+    if (more?.section) {
+      let from: string | undefined;
+      for (let page = 0; page < 8 && tracks.length < 800; page++) {
+        const s = await call("catalog.getSection", { section_id: more.section, start_from: from, v: CATALOG_V }).catch(() => null);
+        if (!s) break;
+        const sp = catalogPools(s);
+        const before = tracks.length;
+        for (const b of s.section?.blocks ?? []) if (b.data_type === "music_audios") push(b.audios_ids, sp.audios);
+        from = s.section?.next_from;
+        if (!from || tracks.length === before) break;
+      }
+    }
+    return { tracks, playlists, artists };
+  });
+}
+
 export const vkApi: MusicApi = {
   demo: false,
 
@@ -245,73 +319,35 @@ export const vkApi: MusicApi = {
     return items(r).map(mapTrack);
   },
 
+  /** Поиск ровно как в приложении ВК: та же выдача и тот же порядок. */
   searchTracks(q) {
-    return cached(`t:${norm(q)}`, async () => {
-      // 1) Сам запрос и его «чистая» версия: ВК путается в тире и знаках вроде «—» и «%»
-      const clean = q.replace(/\s+[-–—]+\s+/g, " ").replace(/[%#@]/g, " ").replace(/\s+/g, " ").trim();
-      const qs = [...new Set([q.trim(), clean].filter(Boolean))];
-      const first = await Promise.allSettled(qs.map((x) => call("audio.search", { q: x, count: 300, auto_complete: 1 })));
-      if (first.every((r) => r.status === "rejected")) throw (first[0] as PromiseRejectedResult).reason;
-      let list = first.flatMap((r) => (r.status === "fulfilled" ? items(r.value).map(mapTrack) : []));
-      // Все страницы выдачи (до 1200 треков) — чтобы попали все перезаливы и версии
-      const full = first.find((r) => r.status === "fulfilled" && items(r.value).length >= 300);
-      if (full) {
-        const qx = qs[first.indexOf(full)];
-        for (let off = 300; off < 1200; off += 300) {
-          const page = await call("audio.search", { q: qx, count: 300, offset: off, auto_complete: 1 }).then((r) => items(r).map(mapTrack)).catch(() => [] as Track[]);
-          list = list.concat(page);
-          if (page.length < 300) break;
-        }
+    return cached(`t:${q.trim().toLowerCase()}`, async () => {
+      const c = await catalogSearch(q).catch(() => null);
+      if (c?.tracks.length) return c.tracks;
+      // Запасной путь — обычный audio.search (тот же порядок, что отдаёт ВК)
+      let list: Track[] = [];
+      for (let off = 0; off < 600; off += 300) {
+        const r = await call("audio.search", { q: q.trim(), count: 300, offset: off, auto_complete: 1, sort: 0 });
+        const page = items(r).map(mapTrack);
+        list = list.concat(page);
+        if (page.length < 300) break;
       }
-
-      // 2) Запрос вида «исполнитель + название»: поиск ВК часто отдаёт перезаливы и nightcore,
-      //    а оригинала нет. Находим исполнителя и берём его собственные треки с таким названием.
-      const qw = words(q);
-      const dash = q.split(/\s+[-–—]+\s+/);
-      const counts = new Map<string, { a: Artist; n: number }>();
-      for (const t of list) for (const name of trackArtists(t)) {
-        const k = norm(name);
-        if (!k || coverage(name, q) < 1 || words(name).length >= qw.length) continue;
-        const a = t.artists?.find((x: Artist) => norm(x.name) === k) ?? { name };
-        const c = counts.get(k);
-        counts.set(k, { a: c?.a.id ? c.a : a, n: (c?.n ?? 0) + 1 });
-      }
-      let who = [...counts.values()].sort((x, y) => y.n - x.n || words(y.a.name).length - words(x.a.name).length)[0]?.a;
-      if (dash.length >= 2 && coverage(dash[0], who?.name ?? "") < 1) who = { name: dash[0].trim() };
-      if (who) {
-        const aw = new Set(words(who.name));
-        const rest = qw.filter((w) => !aw.has(w)).join(" ");
-        if (rest) {
-          const own = await vkApi.artistTracks(who).catch(() => [] as Track[]);
-          const extra = await Promise.all([`${who.name} ${rest}`, `${rest} ${who.name}`, `${who.name} - ${rest}`].map((x) =>
-            call("audio.search", { q: x, count: 300, auto_complete: 0 }).then((r) => items(r).map(mapTrack)).catch(() => [] as Track[])));
-          list = [...own.filter((t) => coverage(rest, t.title) >= 0.5), ...extra.flat(), ...list];
-        }
-      }
-      const ranked = rankTracks(relevant(uniqueTracks(list), q), { any: q }, false, true);
-      // Сразу за лучшим совпадением — все остальные загрузки этой же песни (перезаливы, без цензуры и т. п.)
-      const top = ranked[0];
-      if (!top || !who) return ranked;
-      const same = ranked.filter((t) => t === top || isSameSong(top, t));
-      return [...same, ...ranked.filter((t) => !same.includes(t))];
+      return uniqueTracks(list);
     });
   },
 
   searchExtras(q) {
-    return cached(`x:${norm(q)}`, async () => {
-      const [pl, ar] = await Promise.allSettled([
-        call("audio.searchPlaylists", { q, count: 20 }),
-        call("audio.searchArtists", { q, count: 8 }),
-      ]);
-      let artists: Artist[] = ar.status === "fulfilled" ? items(ar.value).map(mapArtist) : [];
-      if (!artists.length) {
-        // ВК не дал список исполнителей — собираем из найденных треков
-        const tracks = await vkApi.searchTracks(q).catch(() => [] as Track[]);
-        const seen = new Map<string, Artist>();
-        for (const t of tracks) for (const a of t.artists ?? []) {
-          if (coverage(a.name, q) >= 1 || coverage(q, a.name) >= 1) if (!seen.has(norm(a.name))) seen.set(norm(a.name), a);
-        }
-        artists = [...seen.values()].slice(0, 6);
+    return cached(`x:${q.trim().toLowerCase()}`, async () => {
+      const c = await catalogSearch(q).catch(() => null);
+      let playlists = c?.playlists ?? [];
+      let artists = c?.artists ?? [];
+      if (!playlists.length || !artists.length) {
+        const [pl, ar] = await Promise.allSettled([
+          playlists.length ? Promise.resolve(null) : call("audio.searchPlaylists", { q, count: 20 }),
+          artists.length ? Promise.resolve(null) : call("audio.searchArtists", { q, count: 8 }),
+        ]);
+        if (!playlists.length && pl.status === "fulfilled") playlists = items(pl.value).map((p: any) => mapPlaylist(p, me?.id));
+        if (!artists.length && ar.status === "fulfilled") artists = items(ar.value).map(mapArtist);
       }
       // У поиска исполнителей часто нет фото — берём из карточки исполнителя, а если и там нет, из обложки альбома
       artists = await Promise.all(artists.filter((a) => a.name).slice(0, 8).map(async (a) => {
@@ -321,10 +357,7 @@ export const vkApi: MusicApi = {
         const albums = a.id ? await vkApi.artistAlbums(a).catch(() => [] as Playlist[]) : [];
         return { ...a, photo: albums.find((x: Playlist) => x.cover)?.cover };
       }));
-      return {
-        playlists: pl.status === "fulfilled" ? items(pl.value).map((p: any) => mapPlaylist(p, me?.id)) : [],
-        artists,
-      };
+      return { playlists, artists };
     });
   },
 

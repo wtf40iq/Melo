@@ -1324,3 +1324,8 @@ html.anim-off .eq-pop, html.anim-off .eq-pop.leaving { animation: none; }
 .login-links { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .login-links .link-btn { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .login-lead { font-size: 13px; color: var(--muted); text-align: left; line-height: 1.4; }
+
+/* Кнопка «Обновить» в заголовке, когда вышла новая версия */
+.upd-pill { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; margin-right: 8px; border-radius: 13px; border: 0; cursor: pointer;
+  background: var(--accent); color: #fff; font: 600 12px/1 inherit; font-family: inherit; animation: fade-in .3s ease; }
+.upd-pill:hover { filter: brightness(1.1); }

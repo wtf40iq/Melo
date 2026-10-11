@@ -1,10 +1,11 @@
 import { Logo } from "./Logo";
-import { ChevronLeft, ChevronRight, History, Minus, Search, SlidersHorizontal, Square, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, History, Minus, Search, SlidersHorizontal, Square, X } from "lucide-react";
 import { useRef, useState } from "react";
 import { searchHistory, useSearchHistory } from "../store/history";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { inTauri } from "../api";
 import { useT } from "../store/settings";
+import { useUpdateMaybe } from "../store/update";
 const win = () => (inTauri ? getCurrentWindow() : null);
 
 type Props = {
@@ -37,6 +38,7 @@ export function TitleBar({ query, onQuery, canBack, canForward, onBack, onForwar
     else if (e.key === "Escape") { setFocus(false); inputRef.current?.blur(); }
   };
   const t = useT();
+  const upd = useUpdateMaybe();
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="brand" data-tauri-drag-region>
@@ -99,6 +101,12 @@ export function TitleBar({ query, onQuery, canBack, canForward, onBack, onForwar
       </>}
 
       <div className="spacer" data-tauri-drag-region />
+
+      {upd?.info?.available && (
+        <button className="upd-pill" onClick={() => upd.setOpen(true)} title={t("Доступна версия {v}", { v: upd.info.version })}>
+          <Download size={14} /> {t("Новая версия")}
+        </button>
+      )}
 
       <div className="window-controls">
         <button onClick={() => win()?.minimize()} aria-label={t("Свернуть")}>

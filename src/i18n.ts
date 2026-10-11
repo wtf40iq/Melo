@@ -360,6 +360,7 @@ const en: Record<string, string> = {
   "Скачивание…": "Downloading…",
   "Попробовать снова": "Try again",
   "Обновить сейчас": "Update now",
+  "Новая версия": "Update",
   "Позже": "Later",
   "Проверять обновления": "Check for updates",
   "Melo сам узнаёт о новой версии на GitHub и предлагает обновиться": "Melo checks GitHub for new versions and offers to update",

@@ -487,7 +487,9 @@ async fn vk_call(
             (k, v)
         })
         .collect();
-    form.push(("v".into(), API_VERSION.into()));
+    if !form.iter().any(|(k, _)| k == "v") {
+        form.push(("v".into(), API_VERSION.into()));
+    }
     if !form.iter().any(|(k, _)| k == "lang") {
         form.push(("lang".into(), "ru".into()));
     }
@@ -1767,38 +1769,98 @@ fn parse_ver(v: &str) -> Vec<u64> {
     v.trim_start_matches(['v', 'V']).split(['.', '-']).take(3).map(|p| p.parse().unwrap_or(0)).collect()
 }
 
+/// Лучший релиз из ответа GitHub API: самая новая версия, у которой уже загружен Melo.exe
+/// (пока CI собирает релиз, файла в нём ещё нет — такой релиз пропускаем).
+fn pick_release(list: &[Value]) -> Option<(&Value, &Value)> {
+    list.iter()
+        .filter(|r| !r["draft"].as_bool().unwrap_or(false) && !r["prerelease"].as_bool().unwrap_or(false))
+        .filter_map(|r| {
+            let a = r["assets"].as_array()?.iter().find(|x| {
+                x["name"].as_str().map(|n| n.eq_ignore_ascii_case("Melo.exe")).unwrap_or(false)
+                    && x["state"].as_str().unwrap_or("uploaded") == "uploaded"
+            })?;
+            Some((r, a))
+        })
+        .max_by(|x, y| {
+            let v = |r: &Value| parse_ver(r["tag_name"].as_str().unwrap_or_default());
+            v(x.0).cmp(&v(y.0))
+        })
+}
+
 #[tauri::command]
 async fn update_check(app: AppHandle, state: State<'_, AppState>) -> Result<UpdateInfo, String> {
     let current = app.package_info().version.to_string();
-    let r = state
+    let api = |url: String| {
+        state
+            .http
+            .get(url)
+            .header("User-Agent", "Melo-updater")
+            .header("Accept", "application/vnd.github+json")
+            .header("Cache-Control", "no-cache")
+            .timeout(Duration::from_secs(15))
+            .send()
+    };
+    let mut last_err = String::new();
+    // 1) GitHub API: список последних релизов (надёжнее, чем /latest — тот кешируется и
+    //    может указывать на релиз, в который ещё не загружен exe)
+    for attempt in 0..2 {
+        match api(format!("https://api.github.com/repos/{UPDATE_REPO}/releases?per_page=10")).await {
+            Ok(r) if r.status().is_success() => {
+                let list: Vec<Value> = r.json().await.unwrap_or_default();
+                if let Some((rel, asset)) = pick_release(&list) {
+                    let version = rel["tag_name"].as_str().unwrap_or_default().trim_start_matches(['v', 'V']).to_string();
+                    return Ok(UpdateInfo {
+                        available: parse_ver(&version) > parse_ver(&current),
+                        current,
+                        version,
+                        notes: rel["body"].as_str().unwrap_or_default().to_string(),
+                        url: asset["browser_download_url"].as_str().unwrap_or_default().to_string(),
+                        size: asset["size"].as_u64().unwrap_or(0),
+                        digest: asset["digest"].as_str().map(|d| d.trim_start_matches("sha256:").to_lowercase()),
+                        page: rel["html_url"].as_str().unwrap_or_default().to_string(),
+                    });
+                }
+                last_err = "На GitHub пока нет релизов".into();
+                break;
+            }
+            Ok(r) => {
+                last_err = format!("GitHub ответил {}", r.status());
+                // 403/429 — лимит запросов к API, повтор не поможет: идём запасным путём
+                if matches!(r.status().as_u16(), 403 | 429) {
+                    break;
+                }
+            }
+            Err(e) => last_err = format!("Нет связи с GitHub: {e}"),
+        }
+        if attempt == 0 {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+    // 2) Запасной путь без API и без лимитов: страница последнего релиза перенаправляет на /tag/vX.Y.Z
+    let page = state
         .http
-        .get(format!("https://api.github.com/repos/{UPDATE_REPO}/releases/latest"))
+        .get(format!("https://github.com/{UPDATE_REPO}/releases/latest"))
         .header("User-Agent", "Melo-updater")
-        .header("Accept", "application/vnd.github+json")
+        .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|e| format!("Нет связи с GitHub: {e}"))?;
-    if r.status().as_u16() == 404 {
-        return Err("На GitHub пока нет релизов".into());
-    }
-    if !r.status().is_success() {
-        return Err(format!("GitHub ответил {}", r.status()));
-    }
-    let j: Value = r.json().await.map_err(|e| e.to_string())?;
-    let tag = j["tag_name"].as_str().unwrap_or_default().to_string();
-    let asset = j["assets"].as_array().and_then(|a| {
-        a.iter().find(|x| x["name"].as_str().map(|n| n.eq_ignore_ascii_case("Melo.exe")).unwrap_or(false))
-    });
+        .map_err(|e| if last_err.is_empty() { format!("Нет связи с GitHub: {e}") } else { last_err.clone() })?;
+    let final_url = page.url().to_string();
+    let tag = final_url.rsplit("/tag/").next().filter(|t| !t.contains('/') && final_url.contains("/tag/")).ok_or(last_err.clone())?.to_string();
+    let url = format!("https://github.com/{UPDATE_REPO}/releases/download/{tag}/Melo.exe");
+    let head = state.http.head(&url).header("User-Agent", "Melo-updater").timeout(Duration::from_secs(15)).send().await;
+    let ok = head.as_ref().map(|r| r.status().is_success()).unwrap_or(false);
+    let size = head.ok().and_then(|r| r.content_length()).unwrap_or(0);
     let version = tag.trim_start_matches(['v', 'V']).to_string();
     Ok(UpdateInfo {
-        available: asset.is_some() && parse_ver(&version) > parse_ver(&current),
+        available: ok && parse_ver(&version) > parse_ver(&current),
         current,
         version,
-        notes: j["body"].as_str().unwrap_or_default().to_string(),
-        url: asset.and_then(|a| a["browser_download_url"].as_str()).unwrap_or_default().to_string(),
-        size: asset.and_then(|a| a["size"].as_u64()).unwrap_or(0),
-        digest: asset.and_then(|a| a["digest"].as_str()).map(|d| d.trim_start_matches("sha256:").to_lowercase()),
-        page: j["html_url"].as_str().unwrap_or_default().to_string(),
+        notes: String::new(),
+        url: if ok { url } else { String::new() },
+        size,
+        digest: None,
+        page: final_url,
     })
 }
 

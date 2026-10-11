@@ -23,6 +23,18 @@ type Ctx = {
 
 const C = createContext<Ctx | null>(null);
 
+/** «Позже» откладывает напоминание о версии на 12 часов, а не навсегда. */
+const SNOOZE_KEY = "melo.update.snooze";
+const snoozed = (v: string) => {
+  try {
+    const x = JSON.parse(localStorage.getItem(SNOOZE_KEY) || "null");
+    return x?.v === v && Date.now() < x.until;
+  } catch {
+    return false;
+  }
+};
+export const snoozeUpdate = (v: string) => localStorage.setItem(SNOOZE_KEY, JSON.stringify({ v, until: Date.now() + 12 * 3600_000 }));
+
 export function UpdateProvider({ children }: { children: ReactNode }) {
   const s = useSettings();
   const [status, setStatus] = useState<Status>("idle");
@@ -32,20 +44,25 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false);
   const busy = useRef(false);
 
+  const lastCheck = useRef(0);
+  const fails = useRef(0);
   const check = useCallback(async (manual = false) => {
     if (!inTauri || busy.current) return;
     busy.current = true;
-    setStatus("checking");
+    lastCheck.current = Date.now();
+    if (manual) setStatus("checking");
     setError("");
     try {
       const i = await invoke<UpdateInfo>("update_check");
+      fails.current = 0;
       setInfo(i);
       setStatus(i.available ? "available" : "latest");
-      // автоматически показываем каждую версию один раз; вручную — всегда
-      if (i.available && (manual || localStorage.getItem("melo.update.skip") !== i.version)) setOpen(true);
+      if (i.available && (manual || !snoozed(i.version))) setOpen(true);
     } catch (e) {
-      setError(String(e));
-      setStatus("error");
+      fails.current++;
+      // Тихая проверка не пугает ошибкой — просто попробуем ещё раз позже
+      if (manual) { setError(String(e)); setStatus("error"); }
+      else setStatus((st) => (st === "checking" ? "idle" : st));
     } finally {
       busy.current = false;
     }
@@ -75,12 +92,30 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
     return () => off?.();
   }, []);
 
-  // Тихая проверка вскоре после запуска и раз в 6 часов
+  // Тихая проверка: вскоре после запуска, потом каждый час. Если не получилось (нет сети,
+  // лимит GitHub) — повтор через 2, 5, 15, 30 минут. Плюс при разворачивании окна и
+  // появлении сети, если давно не проверяли.
   useEffect(() => {
     if (!inTauri || !s.autoUpdate) return;
-    const first = setTimeout(() => check(), 5000);
-    const every = setInterval(() => check(), 6 * 3600 * 1000);
-    return () => { clearTimeout(first); clearInterval(every); };
+    let timer = 0;
+    const plan = () => {
+      clearTimeout(timer);
+      const retry = [2, 5, 15, 30][Math.min(fails.current, 3)] * 60_000;
+      timer = window.setTimeout(run, fails.current ? retry : 60 * 60_000);
+    };
+    const run = () => { check().finally(plan); };
+    timer = window.setTimeout(run, 4000);
+    const stale = () => { if (Date.now() - lastCheck.current > 20 * 60_000) run(); };
+    const vis = () => { if (!document.hidden) stale(); };
+    window.addEventListener("online", run);
+    window.addEventListener("focus", stale);
+    document.addEventListener("visibilitychange", vis);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("online", run);
+      window.removeEventListener("focus", stale);
+      document.removeEventListener("visibilitychange", vis);
+    };
   }, [s.autoUpdate, check]);
 
   return <C.Provider value={{ status, info, error, progress, open, setOpen, check, install }}>{children}</C.Provider>;
@@ -91,3 +126,6 @@ export const useUpdate = () => {
   if (!v) throw new Error("useUpdate вне UpdateProvider");
   return v;
 };
+
+/** Можно звать где угодно: вне UpdateProvider вернёт null. */
+export const useUpdateMaybe = () => useContext(C);

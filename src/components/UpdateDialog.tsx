@@ -1,5 +1,5 @@
 import { Download, Loader2, X } from "lucide-react";
-import { useUpdate } from "../store/update";
+import { snoozeUpdate, useUpdate } from "../store/update";
 import { useT } from "../store/settings";
 
 const mb = (n: number) => `${(n / 1048576).toFixed(1)} МБ`;
@@ -11,11 +11,11 @@ export function UpdateDialog() {
   if (!u.open || !u.info) return null;
   const downloading = u.status === "downloading";
   const later = () => {
-    localStorage.setItem("melo.update.skip", u.info!.version);
+    snoozeUpdate(u.info!.version);
     u.setOpen(false);
   };
   return (
-    <div className="upd-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !downloading && later()}>
+    <div className="upd-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !downloading && u.setOpen(false)}>
       <div className="upd-card" role="dialog" aria-label={t("Доступно обновление")}>
         {!downloading && (
           <button className="icon-btn sm upd-close" onClick={later} aria-label={t("Закрыть")}><X size={16} /></button>
