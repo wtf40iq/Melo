@@ -319,25 +319,42 @@ export const vkApi: MusicApi = {
     return items(r).map(mapTrack);
   },
 
-  /** Поиск: выдача ВК в её порядке, но сначала треки, где есть все слова запроса. */
+  /**
+   * Поиск. Берём всю выдачу ВК (все страницы, оба варианта запроса, каталог), ничего не
+   * выбрасываем — перезаливы и повторы остаются. Порядок — по ступеням совпадения,
+   * внутри ступени — как у ВК:
+   *  6 — исполнитель из запроса и точное название (оригинал);  5 — исполнитель и все слова или перезалив «A - B»;
+   *  4 — точное название у другого исполнителя;  3 — все слова запроса (перезаливы «A - B»);
+   *  2 — совпало название;  1 — другие треки этого исполнителя;  0 — остальное.
+   *  Nightcore/speed up/slowed и т. п. — сразу после точных совпадений, если их не просили.
+   */
   searchTracks(q) {
     return cached(`t:${norm(q)}`, async () => {
       const query = q.trim();
       // ВК путается в тире и знаках вроде «%» — ищем и так, и без них
       const clean = query.replace(/\s+[-–—]+\s+/g, " ").replace(/[%#@]/g, " ").replace(/\s+/g, " ").trim();
-      const plain = (x: string) => call("audio.search", { q: x, count: 300, auto_complete: 1 }).then((r) => items(r).map(mapTrack));
+      const pages = async (x: string) => {
+        let out: Track[] = [];
+        for (let off = 0; off < 1500; off += 300) {
+          const r = await call("audio.search", { q: x, count: 300, offset: off, auto_complete: 1 }).catch((e) => { if (!off) throw e; return null; });
+          const page = items(r).map(mapTrack);
+          out = out.concat(page);
+          if (page.length < 290) break;
+        }
+        return out;
+      };
       const res = await Promise.allSettled([
-        plain(query),
-        clean && clean !== query ? plain(clean) : Promise.resolve([] as Track[]),
+        pages(query),
+        clean && clean !== query ? pages(clean) : Promise.resolve([] as Track[]),
         catalogSearch(query).then((c) => c.tracks),
       ]);
       if (res.every((r) => r.status === "rejected")) throw (res[0] as PromiseRejectedResult).reason;
       const got = (i: number) => (res[i].status === "fulfilled" ? (res[i] as PromiseFulfilledResult<Track[]>).value : []);
       let all = uniqueTracks([...got(0), ...got(1), ...got(2)]);
 
-      const full = (t: Track) => coverage(query, `${t.artist} ${t.title}`) >= 1;
       // Исполнитель из запроса — тот, чьё имя целиком есть в запросе и чьих треков больше всего
       const qw = words(query);
+      const dash = query.split(/\s+[-–—]+\s+/);
       const counts = new Map<string, { a: Artist; n: number }>();
       for (const t of all) for (const name of trackArtists(t)) {
         const k = norm(name);
@@ -346,19 +363,44 @@ export const vkApi: MusicApi = {
         const c = counts.get(k);
         counts.set(k, { a: c?.a.id ? c.a : a, n: (c?.n ?? 0) + 1 });
       }
-      const who = [...counts.values()].sort((x, y) => y.n - x.n || words(y.a.name).length - words(x.a.name).length)[0]?.a;
-      // Поиск ВК не нашёл саму песню — ищем среди треков этого исполнителя
-      if (who && !all.some(full)) {
-        const own = await vkApi.artistTracks(who).catch(() => [] as Track[]);
-        all = uniqueTracks([...all, ...own]);
-      }
+      let who = [...counts.values()].sort((x, y) => y.n - x.n || words(y.a.name).length - words(x.a.name).length)[0]?.a;
+      if (!who && dash.length >= 2 && words(dash[0]).length < qw.length) who = { name: dash[0].trim() };
       const aw = new Set(who ? words(who.name) : []);
       const rest = norm(qw.filter((w) => !aw.has(w)).join(" "));
-      const byArtist = (t: Track) => !!who && trackArtists(t).some((n) => norm(n) === norm(who.name));
-      const score = (t: Track) => (byArtist(t) ? 2 : 0) + (rest && norm(t.title) === rest ? 1 : 0);
-      const exact = all.filter(full).map((t, i) => ({ t, i, s: score(t) })).sort((x, y) => y.s - x.s || x.i - y.i).map((x) => x.t);
-      const ids = new Set(exact.map((t) => t.id));
-      return [...exact, ...all.filter((t) => !ids.has(t.id))];
+
+      // Песня исполнителя могла не попасть в поиск — смотрим его треки и альбомы
+      if (who && rest) {
+        const [own, albums] = await Promise.all([
+          vkApi.artistTracks(who).catch(() => [] as Track[]),
+          who.id ? vkApi.artistAlbums(who).catch(() => [] as Playlist[]) : Promise.resolve([] as Playlist[]),
+        ]);
+        const fromAlbums = await Promise.allSettled(albums.slice(0, 8).map((p) => vkApi.playlistTracks(p)));
+        const extra = [...own, ...fromAlbums.flatMap((r) => (r.status === "fulfilled" ? r.value : []))];
+        all = uniqueTracks([...all, ...extra]);
+      }
+
+      const bare = (s: string) => norm(s.replace(/[([{][^)\]}]*[)\]}]/g, " "));
+      const wantMix = /\b(speed|sped|slowed|remix|nightcore|reverb|cover|karaoke|минус|bass)\b/.test(norm(query));
+      const isMix = (t: Track) => /\b(speed up|sped up|slowed|remix|nightcore\w*|reverb|cover|karaoke|минус|bass boosted)\b/.test(norm(`${t.title} ${t.artist}`));
+      const byArtist = (t: Track) => !!who && trackArtists(t).some((n) => norm(n) === norm(who!.name));
+      // Перезалив «Исполнитель - Название» от другого человека: в названии есть исполнитель, а остаток — ровно название
+      const reupload = (t: Track) => !!who && !!rest && coverage(who.name, t.title) >= 1 && norm(words(bare(t.title)).filter((w) => !aw.has(w)).join(" ")) === rest;
+      const tier = (t: Track) => {
+        const full = coverage(query, `${t.artist} ${bare(t.title)}`) >= 1;
+        const titleExact = !!rest && bare(t.title) === rest;
+        const art = byArtist(t);
+        let s = 0;
+        if (art && titleExact) s = 6;
+        else if ((art && full) || reupload(t)) s = 5;
+        else if (titleExact) s = 4;
+        else if (full) s = 3;
+        else if (rest && coverage(rest, bare(t.title)) >= 1) s = 2;
+        else if (art) s = 1;
+        // Nightcore/speed up и т. п. — ниже оригиналов и перезаливов, если их не просили
+        if (s >= 3 && !wantMix && isMix(t)) s = 2.5;
+        return s;
+      };
+      return all.map((t, i) => ({ t, i, s: tier(t) })).sort((x, y) => y.s - x.s || x.i - y.i).map((x) => x.t);
     });
   },
 

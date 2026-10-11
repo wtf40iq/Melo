@@ -95,18 +95,18 @@ export function SearchPage({ query }: { query: string }) {
           <ArtistRow items={artists} />
         </section>
       )}
-      {(tab === "all" || tab === "tracks") && (loading ? <Loading /> : list.length > 0 && (
-        <section>
-          {tab === "all" && <div className="section-head"><h3>{t("Треки")}</h3>{list.length > 10 && <button className="link-btn" onClick={() => setTab("tracks")}>{t("Показать все")}</button>}</div>}
-          <TrackList tracks={tab === "all" ? list.slice(0, 10) : list} />
-        </section>
-      ))}
       {(tab === "all" || tab === "playlists") && pls.length > 0 && (
         <section>
           {tab === "all" && <div className="section-head"><h3>{t("Плейлисты")}</h3></div>}
           <PlaylistGrid items={tab === "all" ? pls.slice(0, 5) : pls} />
         </section>
       )}
+      {(tab === "all" || tab === "tracks") && (loading ? <Loading /> : list.length > 0 && (
+        <section>
+          {tab === "all" && <div className="section-head"><h3>{t("Треки")}</h3></div>}
+          <TrackList tracks={list} />
+        </section>
+      ))}
       {!loading && extras && !list.length && !pls.length && !artists.length && !mine.length && (
         <Empty title={t("Ничего не нашлось")} text={t("Попробуйте точный поиск: исполнитель и название отдельно")} />
       )}
