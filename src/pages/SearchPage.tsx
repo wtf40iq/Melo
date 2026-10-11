@@ -95,10 +95,9 @@ export function SearchPage({ query }: { query: string }) {
           <ArtistRow items={artists} />
         </section>
       )}
-      {(tab === "all" || tab === "playlists") && pls.length > 0 && (
+      {tab === "playlists" && pls.length > 0 && (
         <section>
-          {tab === "all" && <div className="section-head"><h3>{t("Плейлисты")}</h3></div>}
-          <PlaylistGrid items={tab === "all" ? pls.slice(0, 5) : pls} />
+          <PlaylistGrid items={pls} />
         </section>
       )}
       {(tab === "all" || tab === "tracks") && (loading ? <Loading /> : list.length > 0 && (

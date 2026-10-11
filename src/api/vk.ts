@@ -325,7 +325,7 @@ export const vkApi: MusicApi = {
    * внутри ступени — как у ВК:
    *  6 — исполнитель из запроса и точное название (оригинал);  5 — исполнитель и все слова или перезалив «A - B»;
    *  4 — точное название у другого исполнителя;  3 — все слова запроса (перезаливы «A - B»);
-   *  2 — совпало название;  1 — другие треки этого исполнителя;  0 — остальное.
+   *  2 — совпало название. Если такие есть, прочие треки исполнителя и случайные результаты скрываются.
    *  Nightcore/speed up/slowed и т. п. — сразу после точных совпадений, если их не просили.
    */
   searchTracks(q) {
@@ -368,6 +368,7 @@ export const vkApi: MusicApi = {
       const aw = new Set(who ? words(who.name) : []);
       const rest = norm(qw.filter((w) => !aw.has(w)).join(" "));
 
+      const bare = (s: string) => norm(s.replace(/[([{][^)\]}]*[)\]}]/g, " "));
       // Песня исполнителя могла не попасть в поиск — смотрим его треки и альбомы
       if (who && rest) {
         const [own, albums] = await Promise.all([
@@ -376,10 +377,10 @@ export const vkApi: MusicApi = {
         ]);
         const fromAlbums = await Promise.allSettled(albums.slice(0, 8).map((p) => vkApi.playlistTracks(p)));
         const extra = [...own, ...fromAlbums.flatMap((r) => (r.status === "fulfilled" ? r.value : []))];
-        all = uniqueTracks([...all, ...extra]);
+        // Берём только треки с нужным названием, а не всю дискографию
+        all = uniqueTracks([...all, ...extra.filter((t) => coverage(rest, bare(t.title)) >= 1)]);
       }
 
-      const bare = (s: string) => norm(s.replace(/[([{][^)\]}]*[)\]}]/g, " "));
       const wantMix = /\b(speed|sped|slowed|remix|nightcore|reverb|cover|karaoke|минус|bass)\b/.test(norm(query));
       const isMix = (t: Track) => /\b(speed up|sped up|slowed|remix|nightcore\w*|reverb|cover|karaoke|минус|bass boosted)\b/.test(norm(`${t.title} ${t.artist}`));
       const byArtist = (t: Track) => !!who && trackArtists(t).some((n) => norm(n) === norm(who!.name));
@@ -400,7 +401,10 @@ export const vkApi: MusicApi = {
         if (s >= 3 && !wantMix && isMix(t)) s = 2.5;
         return s;
       };
-      return all.map((t, i) => ({ t, i, s: tier(t) })).sort((x, y) => y.s - x.s || x.i - y.i).map((x) => x.t);
+      const scored = all.map((t, i) => ({ t, i, s: tier(t) }));
+      // Есть совпадения по названию — остальные треки исполнителя и случайные результаты не показываем
+      const kept = scored.some((x) => x.s >= 2) ? scored.filter((x) => x.s >= 2) : scored;
+      return kept.sort((x, y) => y.s - x.s || x.i - y.i).map((x) => x.t);
     });
   },
 
