@@ -191,10 +191,16 @@ export function FireCursor() {
       if (asking || !inTauri) return;
       asking = true;
       invoke<[number, number] | null>("cursor_client").then((c) => {
-        if (c && (sbDrag || down)) move({ clientX: c[0], clientY: c[1] } as PointerEvent);
+        if (c) move({ clientX: c[0], clientY: c[1] } as PointerEvent);
       }).catch(() => {}).finally(() => { asking = false; });
     };
-    const poll = () => { if (!sbDrag) return; ask(); sbRaf = requestAnimationFrame(poll); };
+    // Опрос идёт, пока зажата полоса прокрутки или недавно была прокрутка
+    let pollUntil = 0;
+    const poll = () => {
+      if (!sbDrag && performance.now() > pollUntil) { sbRaf = 0; return; }
+      ask();
+      sbRaf = requestAnimationFrame(poll);
+    };
     const onScrollbar = (e: PointerEvent) => {
       const el = e.target as HTMLElement | null;
       if (!el || !(el instanceof HTMLElement)) return false;
@@ -203,11 +209,15 @@ export function FireCursor() {
         || (el.scrollWidth > el.clientWidth && e.clientY > r.top + el.clientTop + el.clientHeight);
     };
     const sbDown = (e: PointerEvent) => {
-      if (e.button === 0 && onScrollbar(e)) { sbDrag = true; cancelAnimationFrame(sbRaf); sbRaf = requestAnimationFrame(poll); }
+      if (e.button === 0 && onScrollbar(e)) { sbDrag = true; if (!sbRaf) sbRaf = requestAnimationFrame(poll); }
     };
-    const sbStop = (e: PointerEvent) => { if (sbDrag && (e.type === "pointerup" || e.buttons === 0)) { sbDrag = false; cancelAnimationFrame(sbRaf); } };
-    const onScroll = () => { if (down || sbDrag) ask(); };
-    const mouseUp = () => { if (sbDrag) { sbDrag = false; cancelAnimationFrame(sbRaf); } };
+    const sbStop = (e: PointerEvent) => { if (sbDrag && (e.type === "pointerup" || e.buttons === 0)) sbDrag = false; };
+    // Прокрутка идёт и когда тянут полосу (а движений мыши тогда нет): сверяемся с окном
+    const onScroll = () => {
+      pollUntil = performance.now() + 250;
+      if (!sbRaf) sbRaf = requestAnimationFrame(poll);
+    };
+    const mouseUp = () => { sbDrag = false; };
 
     // Переключение раскладки, ввод с IME и т. п. иногда возвращают системную стрелку,
     // хотя мышь не двигалась. Чуть меняем значение cursor — браузер заново ставит «пустой» курсор.

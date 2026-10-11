@@ -1271,6 +1271,7 @@ fn set_background(_w: &tauri::WebviewWindow, _bg: bool) {}
 fn set_window_effect(app: AppHandle, kind: String) -> Result<(), String> {
     use tauri::window::{Effect, EffectsBuilder};
     let w = app.get_webview_window("main").ok_or("нет окна")?;
+    *LAST_EFFECT.lock().unwrap() = kind.clone();
     let effect = match kind.as_str() {
         "mica" => Some(Effect::Mica),
         "tabbed" => Some(Effect::Tabbed),
@@ -1371,7 +1372,26 @@ fn release_tray_menu(app: &AppHandle) {
 const TRAY_W: f64 = 300.0;
 const TRAY_H: f64 = 262.0;
 
+/// Последний выбранный системный фон окна — меню трея создаётся заново и должно выглядеть так же.
+static LAST_EFFECT: Mutex<String> = Mutex::new(String::new());
+
 fn create_tray_menu(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    use tauri::window::{Effect, EffectsBuilder};
+    let w = create_tray_window(app)?;
+    let effect = match LAST_EFFECT.lock().unwrap().as_str() {
+        "mica" => Some(Effect::Mica),
+        "tabbed" => Some(Effect::Tabbed),
+        "acrylic" => Some(Effect::Acrylic),
+        _ => None,
+    };
+    if let Some(e) = effect {
+        let _ = w.set_effects(EffectsBuilder::new().effect(e).build());
+        let _ = w.set_shadow(true);
+    }
+    Ok(w)
+}
+
+fn create_tray_window(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     tauri::WebviewWindowBuilder::new(app, "tray-menu", tauri::WebviewUrl::App("index.html#tray".into()))
         .data_directory(webview_dir())
         .title("Melo")
