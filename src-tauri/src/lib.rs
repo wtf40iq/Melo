@@ -1208,6 +1208,38 @@ fn disable_autofill(w: &tauri::WebviewWindow) {
 #[cfg(not(windows))]
 fn disable_autofill(_w: &tauri::WebviewWindow) {}
 
+// ---------- Экономия памяти, когда окно скрыто ----------
+// Свёрнутое/убранное в трей окно: WebView2 перестаёт рисовать (анимации и canvas
+// замирают) и отдаёт лишнюю память системе. Музыка при этом играет как обычно.
+static IN_BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+fn set_background(w: &tauri::WebviewWindow, bg: bool) {
+    use std::sync::atomic::Ordering;
+    if IN_BACKGROUND.swap(bg, Ordering::Relaxed) == bg {
+        return;
+    }
+    let _ = w.with_webview(move |wv| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::{
+            ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+        };
+        use windows_core::Interface;
+        let c = wv.controller();
+        let _ = c.SetIsVisible(!bg);
+        if let Ok(core) = c.CoreWebView2() {
+            if let Ok(c19) = core.cast::<ICoreWebView2_19>() {
+                let _ = c19.SetMemoryUsageTargetLevel(if bg {
+                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+                } else {
+                    COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+                });
+            }
+        }
+    });
+}
+#[cfg(not(windows))]
+fn set_background(_w: &tauri::WebviewWindow, _bg: bool) {}
+
 // ---------- Эффекты окна (стекло) ----------
 
 /// "none", "mica", "acrylic", "blur", "tabbed" — системный фон окна Windows под прозрачным интерфейсом.
@@ -1290,6 +1322,26 @@ fn hide_tray_menu(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("tray-menu") {
         let _ = w.hide();
     }
+    release_tray_menu(app);
+}
+
+/// Меню трея — отдельный WebView (~100 МБ). Если его минуту не открывали,
+/// закрываем совсем; при следующем клике по значку оно создастся заново.
+fn release_tray_menu(app: &AppHandle) {
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let my = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        if GEN.load(std::sync::atomic::Ordering::Relaxed) != my {
+            return;
+        }
+        if let Some(w) = app.get_webview_window("tray-menu") {
+            if !w.is_visible().unwrap_or(true) {
+                let _ = w.destroy();
+            }
+        }
+    });
 }
 
 const TRAY_W: f64 = 300.0;
@@ -1343,6 +1395,7 @@ fn show_tray_menu(app: &AppHandle, x: f64, y: f64) {
 
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        set_background(&w, false);
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -1598,7 +1651,7 @@ async fn proxy(app: AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let body = if is_playlist {
         rewrite_m3u8(&String::from_utf8_lossy(&bytes), &target, base).into_bytes()
     } else {
-        bytes.to_vec()
+        Vec::from(bytes)
     };
 
     let mut b = Response::builder()
@@ -1655,19 +1708,28 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "tray-menu" {
                 match event {
-                    WindowEvent::Focused(false) => { let _ = window.hide(); }
-                    WindowEvent::CloseRequested { api, .. } => { api.prevent_close(); let _ = window.hide(); }
+                    WindowEvent::Focused(false) => { let _ = window.hide(); release_tray_menu(window.app_handle()); }
+                    WindowEvent::CloseRequested { api, .. } => { api.prevent_close(); let _ = window.hide(); release_tray_menu(window.app_handle()); }
                     _ => {}
                 }
                 return;
             }
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == "main"
-                    && window.state::<AppState>().close_to_tray.load(std::sync::atomic::Ordering::Relaxed)
-                {
-                    api.prevent_close();
-                    let _ = window.hide();
+            if window.label() != "main" {
+                return;
+            }
+            let Some(main) = window.app_handle().get_webview_window("main") else { return };
+            match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    if window.state::<AppState>().close_to_tray.load(std::sync::atomic::Ordering::Relaxed) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        set_background(&main, true);
+                    }
                 }
+                // Свернули/развернули из панели задач
+                WindowEvent::Resized(_) => set_background(&main, main.is_minimized().unwrap_or(false)),
+                WindowEvent::Focused(true) => set_background(&main, false),
+                _ => {}
             }
         })
         .register_asynchronous_uri_scheme_protocol("vkstream", |ctx, request, responder| {

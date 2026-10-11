@@ -171,7 +171,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
       const src = api.streamUrl(track.url!);
       if (track.url!.includes(".m3u8") && Hls.isSupported()) {
-        const h = new Hls({ enableWorker: true, maxBufferLength: 30 });
+        const h = new Hls({ enableWorker: true, maxBufferLength: 30, maxMaxBufferLength: 60, backBufferLength: 15, maxBufferSize: 20 * 1000 * 1000 });
         h.on(Hls.Events.ERROR, (_, d) => {
           if (!d.fatal || seq !== loadSeq.current) return;
           if (!retried.current) load(t, autoplay, true);
