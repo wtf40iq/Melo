@@ -1,7 +1,11 @@
 name: Release
 
+# Релиз создаётся сам, когда на main меняется версия в package.json
+# (или по тегу v*, или вручную: Actions → Release → Run workflow).
 on:
   push:
+    branches: [main]
+    paths: [package.json]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -14,43 +18,72 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Версия
+        id: ver
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") { $tag = "${{ github.ref_name }}" }
+          else { $tag = "v" + (Get-Content package.json -Raw | ConvertFrom-Json).version }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          $skip = "false"
+          if ("${{ github.event_name }}" -eq "push" -and "${{ github.ref_type }}" -ne "tag") {
+            gh release view $tag --repo "${{ github.repository }}" *> $null
+            if ($LASTEXITCODE -eq 0) { $skip = "true" }
+          }
+          "skip=$skip" >> $env:GITHUB_OUTPUT
+          exit 0
+
       - uses: actions/setup-node@v4
+        if: steps.ver.outputs.skip != 'true'
         with:
           node-version: 22
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.ver.outputs.skip != 'true'
 
       - uses: Swatinem/rust-cache@v2
+        if: steps.ver.outputs.skip != 'true'
         with:
           workspaces: src-tauri
 
       - run: npm ci
-
-      - name: Версия
-        id: ver
-        shell: pwsh
-        run: |
-          if ("${{ github.ref_type }}" -eq "tag") { $tag = "${{ github.ref_name }}" }
-          else { $tag = "v" + (Get-Content package.json -Raw | ConvertFrom-Json).version }
-          "tag=$tag" >> $env:GITHUB_OUTPUT
+        if: steps.ver.outputs.skip != 'true'
 
       - name: Сборка
-        run: npx tauri build --no-bundle
+        if: steps.ver.outputs.skip != 'true'
+        run: npx tauri build --bundles nsis
 
       - name: Упаковка
+        if: steps.ver.outputs.skip != 'true'
         shell: pwsh
         run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
           New-Item -ItemType Directory -Force out | Out-Null
           Copy-Item src-tauri/target/release/melo.exe out/Melo.exe
-          Compress-Archive -Path out/Melo.exe -DestinationPath "out/Melo-windows-${{ steps.ver.outputs.tag }}.zip"
+          Compress-Archive -Path out/Melo.exe -DestinationPath "out/Melo-windows-$tag.zip"
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          Copy-Item $setup.FullName "out/Melo-setup-$tag.exe"
 
       - name: Релиз на GitHub
+        if: steps.ver.outputs.skip != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: Melo ${{ steps.ver.outputs.tag }}
+          make_latest: true
           generate_release_notes: true
+          body: |
+            ## Что нового
+            - Меньше расход памяти: свёрнутое или убранное в трей окно перестаёт рисовать и отдаёт память системе (музыка играет как обычно)
+            - Меню трея выгружается из памяти, если его минуту не открывали
+            - Ограничен буфер аудио — уже проигранная часть трека не копится в памяти
+
+            **Установка:** `Melo-setup-${{ steps.ver.outputs.tag }}.exe`. Без установки — `Melo.exe`.
           files: |
             out/Melo.exe
             out/Melo-windows-${{ steps.ver.outputs.tag }}.zip
+            out/Melo-setup-${{ steps.ver.outputs.tag }}.exe
