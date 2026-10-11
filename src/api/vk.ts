@@ -333,10 +333,10 @@ export const vkApi: MusicApi = {
       const query = q.trim();
       // ВК путается в тире и знаках вроде «%» — ищем и так, и без них
       const clean = query.replace(/\s+[-–—]+\s+/g, " ").replace(/[%#@]/g, " ").replace(/\s+/g, " ").trim();
-      const pages = async (x: string) => {
+      const pages = async (x: string, max = 1500, extra: Record<string, unknown> = { auto_complete: 1 }) => {
         let out: Track[] = [];
-        for (let off = 0; off < 1500; off += 300) {
-          const r = await call("audio.search", { q: x, count: 300, offset: off, auto_complete: 1 }).catch((e) => { if (!off) throw e; return null; });
+        for (let off = 0; off < max; off += 300) {
+          const r = await call("audio.search", { q: x, count: 300, offset: off, ...extra }).catch((e) => { if (!off) throw e; return null; });
           const page = items(r).map(mapTrack);
           out = out.concat(page);
           if (page.length < 290) break;
@@ -369,14 +369,24 @@ export const vkApi: MusicApi = {
       const rest = norm(qw.filter((w) => !aw.has(w)).join(" "));
 
       const bare = (s: string) => norm(s.replace(/[([{][^)\]}]*[)\]}]/g, " "));
-      // Песня исполнителя могла не попасть в поиск — смотрим его треки и альбомы
+      // Запрос «исполнитель + название»: обычный поиск ВК находит лишь часть загрузок.
+      // Добираем все версии и перезаливы: загрузки с этим исполнителем в поле «исполнитель»,
+      // поиск по одному названию (оставляем то, где упомянут исполнитель), другой порядок слов,
+      // треки и альбомы самого исполнителя.
       if (who && rest) {
-        const [own, albums] = await Promise.all([
+        const title = (dash.length >= 2 ? dash.slice(1).join(" - ") : rest).trim();
+        const mentions = (t: Track) => coverage(who!.name, `${t.artist} ${t.title}`) >= 1;
+        const none = () => [] as Track[];
+        const [own, albums, byName, byTitle, swapped, joined] = await Promise.all([
           vkApi.artistTracks(who).catch(() => [] as Track[]),
           who.id ? vkApi.artistAlbums(who).catch(() => [] as Playlist[]) : Promise.resolve([] as Playlist[]),
+          pages(who.name, 1200, { performer_only: 1 }).catch(none),
+          pages(title, 900).then((l) => l.filter(mentions)).catch(none),
+          pages(`${title} ${who.name}`, 600).catch(none),
+          pages(`${who.name} ${title}`, 600, { auto_complete: 0 }).catch(none),
         ]);
         const fromAlbums = await Promise.allSettled(albums.slice(0, 8).map((p) => vkApi.playlistTracks(p)));
-        const extra = [...own, ...fromAlbums.flatMap((r) => (r.status === "fulfilled" ? r.value : []))];
+        const extra = [...own, ...byName, ...byTitle, ...swapped, ...joined, ...fromAlbums.flatMap((r) => (r.status === "fulfilled" ? r.value : []))];
         // Берём только треки с нужным названием, а не всю дискографию
         all = uniqueTracks([...all, ...extra.filter((t) => coverage(rest, bare(t.title)) >= 1)]);
       }
