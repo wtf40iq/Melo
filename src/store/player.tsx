@@ -1,3 +1,4 @@
+import { antiBlur } from "./antiblur";
 import { createContext, ReactNode, useCallback, useContext, useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
 import { api } from "../api";
@@ -33,6 +34,8 @@ type PlayerState = {
   enqueue: (t: Track) => void;
   /** Заменить всё, что играет после текущего трека. */
   replaceUpcoming: (tracks: Track[]) => void;
+  /** Подменить играющий трек другой версией, сохранив позицию. */
+  swapCurrent: (t: Track) => void;
   removeAt: (i: number) => void;
   stop: () => void;
   /** Восстановить очередь и позицию, сохранённые для этого аккаунта. */
@@ -103,6 +106,42 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setQueue(q);
   };
 
+  // Трек не грузится даже по свежей ссылке (ВК отдаёт 500 и т. п.) — играем другую загрузку той же песни
+  const altTried = useRef(new Map<string, Set<string>>());
+  const altRef = useRef<(t: Track, autoplay: boolean, why: string) => Promise<boolean>>(async () => false);
+  altRef.current = async (t, autoplay, why) => {
+    const orig = t.blurOrig ?? t;
+    const tried = altTried.current.get(orig.id) ?? new Set<string>([orig.id]);
+    tried.add(t.id);
+    altTried.current.set(orig.id, tried);
+    if (t.id.startsWith("off:") || tried.size > 6) {
+      setBuffering(false);
+      toast("Не удалось загрузить трек: {e}", { e: why });
+      return false;
+    }
+    setBuffering(true);
+    const seq = loadSeq.current;
+    const list = await api.variants(orig).catch(() => [] as Track[]);
+    if (seq !== loadSeq.current) return true; // уже включили другой трек
+    // Следующая ещё не пробованная загрузка; если и она не пойдёт — попробуем ещё одну
+    const alt = list.find((x) => x.url && !tried.has(x.id));
+    if (!alt) {
+      setBuffering(false);
+      toast("Не удалось загрузить трек: {e}", { e: why });
+      return false;
+    }
+    const next = { ...alt, blurOrig: orig };
+    const i = state.current.index;
+    const q = state.current.queue.slice();
+    if (q[i]?.id === t.id) {
+      q[i] = next;
+      state.current.queue = q;
+      setQueue(q);
+    }
+    toast("«{name}» не загрузился — включил другую загрузку этой песни", { name: orig.title });
+    return load(next, autoplay);
+  };
+
   // Загрузка трека в <audio>. Если ссылки нет или она протухла — берём свежую.
   const load = useCallback(
     async (t: Track, autoplay: boolean, isRetry = false): Promise<boolean> => {
@@ -125,8 +164,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           track = { ...t, url: fresh.url };
           patchQueue(track);
         } else if (isRetry || !track.url) {
-          toast("«{name}» недоступен для прослушивания", { name: t.title });
-          return false;
+          return altRef.current(t, autoplay, "нет ссылки");
         }
       }
       playingTrack.current = track;
@@ -138,9 +176,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           if (!d.fatal || seq !== loadSeq.current) return;
           if (!retried.current) load(t, autoplay, true);
           else {
-            toast("Не удалось загрузить трек: {e}", { e: `${d.details}${d.response?.code ? ` (${d.response.code})` : ""}` });
-            setBuffering(false);
             setPlaying(false);
+            altRef.current(t, autoplay, `${d.details}${d.response?.code ? ` (${d.response.code})` : ""}`);
           }
         });
         h.loadSource(src);
@@ -172,9 +209,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     async (i: number, autoplay = true) => {
       const q = state.current.queue;
       if (i < 0 || i >= q.length) return;
+      // Анти-блюр: для этого трека уже выбрана версия без замазки
+      const alt = !q[i].blurOrig && antiBlur.get(q[i].id);
+      if (alt) {
+        const nq = q.slice();
+        nq[i] = { ...alt, blurOrig: q[i] };
+        state.current.queue = nq;
+        setQueue(nq);
+      }
       setIndex(i);
       state.current.index = i;
-      const ok = await load(q[i], autoplay);
+      const ok = await load(state.current.queue[i], autoplay);
       if (!ok && autoplay && skipRef.current && i + 1 < state.current.queue.length && state.current.index === i) {
         setTimeout(() => goTo(i + 1), 600); // пропускаем недоступный
       }
@@ -219,10 +264,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         () => {
           if (hls.current || !el.getAttribute("src") || !playingTrack.current) return;
           if (!retried.current) load(playingTrack.current, true, true); // ссылка протухла — пробуем свежую
-          else {
-            setBuffering(false);
-            toast("Не удалось загрузить трек: {e}", { e: `media ${el.error?.code ?? "?"}` });
-          }
+          else altRef.current(playingTrack.current, true, `media ${el.error?.code ?? "?"}`);
         },
       ],
     ];
@@ -379,6 +421,25 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       original.current = q;
       state.current.queue = q;
       setQueue(q);
+    },
+    swapCurrent: (t) => {
+      const i = state.current.index;
+      const q = state.current.queue.slice();
+      if (!q[i]) return;
+      const el = audio.current;
+      const pos = el.currentTime || 0;
+      const wasPlaying = !el.paused;
+      const old = q[i];
+      q[i] = t;
+      state.current.queue = q;
+      setQueue(q);
+      original.current = original.current.map((x) => (x.id === old.id ? t : x));
+      load(t, wasPlaying).then((ok) => {
+        if (!ok) return;
+        const apply = () => { el.currentTime = Math.min(pos, Math.max(0, (el.duration || t.duration) - 1)); setPosition(el.currentTime); };
+        if (el.readyState >= 1) apply();
+        else el.addEventListener("loadedmetadata", apply, { once: true });
+      });
     },
     enqueue: (t) => {
       if (!current) return startList([t], 0);

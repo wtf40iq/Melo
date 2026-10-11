@@ -3,6 +3,7 @@ import { usePlayer } from "../store/player";
 import { useUi } from "../store/ui";
 import { formatTime } from "../types";
 import { Cover } from "./Cover";
+import { ArtistLinks } from "./ArtistLinks";
 import { useT } from "../store/settings";
 
 export function QueuePanel() {
@@ -23,7 +24,7 @@ export function QueuePanel() {
           <small className="queue-label">{t("Сейчас играет")}</small>
           <div className="q-row current">
             <Cover seed={p.current.title + p.current.artist} src={p.current.cover} size={40} />
-            <span className="q-text"><b>{p.current.title}</b><small>{p.current.artist}</small></span>
+            <span className="q-text"><b>{p.current.title}</b><small><ArtistLinks track={p.current} /></small></span>
           </div>
         </>
       )}

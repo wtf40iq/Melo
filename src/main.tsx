@@ -11,6 +11,12 @@ window.addEventListener("contextmenu", (e) => {
   e.preventDefault();
 });
 
+// Никаких «Сохранённых сведений» браузера в полях ввода — у поиска своя история
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if ((el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) && !el.hasAttribute("autocomplete")) el.setAttribute("autocomplete", "off");
+}, true);
+
 const isTray = location.hash === "#tray";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

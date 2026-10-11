@@ -9,6 +9,9 @@ import { errorText, useUi } from "../store/ui";
 import { formatTime } from "../types";
 import { Cover } from "./Cover";
 import { Visualizer } from "./Visualizer";
+import { EqPopover } from "./EqPanel";
+import { AntiBlur } from "./AntiBlur";
+import { ArtistLinks } from "./ArtistLinks";
 import { useSettings } from "../store/settings";
 import { useT } from "../store/settings";
 import { Mic2, Radio, SlidersHorizontal } from "lucide-react";
@@ -30,6 +33,8 @@ export function PlayerBar() {
   const lib = useLibrary();
   const ui = useUi();
   const lastVol = useRef(0.7);
+  const [eqOpen, setEqOpen] = useState(false);
+  const eqBtn = useRef<HTMLButtonElement>(null);
   const [similarBusy, setSimilarBusy] = useState(false);
   // Похожее: текущий трек доигрывает, дальше в очереди — похожие
   const playSimilar = async () => {
@@ -56,7 +61,8 @@ export function PlayerBar() {
     volTimer.current = window.setTimeout(() => setVolFlash(false), 900);
   };
   const tr = useT();
-  const { visualizer } = useSettings();
+  const s = useSettings();
+  const { visualizer } = s;
   const t = p.current;
   const VolIcon = p.volume === 0 ? VolumeX : p.volume < 0.5 ? Volume1 : Volume2;
   const liked = t ? lib.isMine(t) : false;
@@ -92,7 +98,7 @@ export function PlayerBar() {
               <span className="now-text-row">
                 <b title={t.title}>{t.title}</b>
               </span>
-              <button className="artist-link" onClick={() => ui.setQuery(t.artist)}>{t.artist}</button>
+              <ArtistLinks track={t} />
             </div>
             <button
               className={`icon-btn sm copy-btn ${copied ? "done" : ""}`}
@@ -161,16 +167,19 @@ export function PlayerBar() {
             <button className={`icon-btn ${similarBusy ? "busy" : ""}`} onClick={playSimilar} aria-label={tr("Слушать похожее")} data-tip={tr("Слушать похожее")}>
               {similarBusy ? <Loader2 size={18} className="spin" /> : <Radio size={18} />}
             </button>
+            <AntiBlur />
           </>
         )}
         <button
-          className={`icon-btn ${ui.route.name === "settings" ? "on" : ""}`}
-          onClick={() => ui.navigate({ name: "settings" })}
+          ref={eqBtn}
+          className={`icon-btn ${eqOpen ? "on" : ""} ${s.eqEnabled ? "eq-active" : ""}`}
+          onClick={() => setEqOpen(!eqOpen)}
           aria-label={tr("Эквалайзер")}
-          data-tip={tr("Эквалайзер")}
+          data-tip={eqOpen ? undefined : tr("Эквалайзер")}
         >
           <SlidersHorizontal size={18} />
         </button>
+        <EqPopover open={eqOpen} onClose={() => setEqOpen(false)} anchor={eqBtn} />
         <button className={`icon-btn ${ui.queueOpen ? "on" : ""}`} onClick={() => ui.setQueueOpen(!ui.queueOpen)} aria-label={tr("Очередь")} data-tip={tr("Очередь")}>
           <ListMusic size={19} />
         </button>

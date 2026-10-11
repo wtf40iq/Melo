@@ -13,7 +13,22 @@ export type Track = {
   /** У трека есть текст в ВК */
   hasLyrics?: boolean;
   lyricsId?: number;
+  /** Исполнители с id ВК — для перехода на страницу артиста */
+  artists?: Artist[];
+  /** Анти-блюр: оригинал, вместо которого играет эта версия */
+  blurOrig?: Track;
 };
+
+export type Artist = { id?: string; name: string; photo?: string };
+
+export type ArtistPage = { artist: Artist; tracks: Track[]; albums: Playlist[] };
+
+/** Офлайн-плейлист — папка с музыкой рядом с Melo. */
+export type OfflinePlaylist = { id: string; title: string; description: string; cover?: string; count: number };
+
+export const isOffline = (t: Track) => t.id.startsWith("off:");
+
+export type SearchExtras = { playlists: Playlist[]; artists: Artist[] };
 
 export type Playlist = {
   id: string; // `${ownerId}_${playlistId}`

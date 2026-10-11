@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+mod offline;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
@@ -42,6 +44,18 @@ struct Session {
     name: Option<String>,
     #[serde(default)]
     photo: Option<String>,
+    /// Unix-время, когда ключ истечёт (None — бессрочный)
+    #[serde(default)]
+    expires_at: Option<i64>,
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// Срок жизни ключа из ответа ВК: 0 или пусто — бессрочный.
+fn expiry(expires_in: Option<i64>) -> Option<i64> {
+    expires_in.filter(|&e| e > 0).map(|e| now_secs() + e)
 }
 
 impl Session {
@@ -328,7 +342,8 @@ fn app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
 
 /// Достаёт токен из адреса вида https://oauth.vk.com/blank.html#access_token=...&user_id=...
 fn parse_redirect(u: &Url) -> Option<Result<Session, String>> {
-    if u.host_str() != Some("oauth.vk.com") || u.path() != "/blank.html" {
+    // ВК переезжает на vk.ru — принимаем оба домена
+    if !matches!(u.host_str(), Some("oauth.vk.com") | Some("oauth.vk.ru")) || u.path() != "/blank.html" {
         return None;
     }
     let frag = u.fragment().unwrap_or_default();
@@ -342,6 +357,7 @@ fn parse_redirect(u: &Url) -> Option<Result<Session, String>> {
             client: default_client(),
             name: None,
             photo: None,
+            expires_at: expiry(params.get("expires_in").and_then(|e| e.parse().ok())),
         }));
     }
     if params.contains_key("error") {
@@ -360,13 +376,15 @@ fn reply(tx: &Reply, value: Result<Session, String>) {
 
 /// Открывает окно с официальной страницей входа ВК и ждёт токен.
 #[tauri::command]
-async fn vk_login(app: AppHandle, state: State<'_, AppState>) -> Result<i64, String> {
+async fn vk_login(app: AppHandle, state: State<'_, AppState>, fresh: Option<bool>) -> Result<i64, String> {
     if let Some(w) = app.get_webview_window("vk-auth") {
         let _ = w.close();
     }
     let auth_url = format!(
         "https://oauth.vk.com/authorize?client_id={CLIENT_ID}&display=page&redirect_uri={REDIRECT}\
-         &scope=audio,offline&response_type=token&revoke=1&v={API_VERSION}"
+         &scope=audio,offline&response_type=token&v={API_VERSION}{}",
+        // Если в окне ВК уже выполнен вход — он подхватится сам; для второго аккаунта просим выбрать заново
+        if fresh.unwrap_or(false) { "&revoke=1" } else { "" }
     );
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx: Reply = Arc::new(Mutex::new(Some(tx)));
@@ -469,24 +487,25 @@ async fn vk_call(
             (k, v)
         })
         .collect();
-    form.push(("access_token".into(), token.clone()));
     form.push(("v".into(), API_VERSION.into()));
     if !form.iter().any(|(k, _)| k == "lang") {
         form.push(("lang".into(), "ru".into()));
     }
 
-    let res: Value = state
-        .http
-        .post(format!("https://api.vk.com/method/{method}"))
-        .header("User-Agent", ua)
-        .form(&form)
-        .send()
-        .await
-        .map_err(|_| "Нет соединения с ВКонтакте".to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    // Раньше ключ с ограниченным сроком (QR) «продлевался» скрытым входом через Kate Mobile каждые
+    // 5 минут. ВК считал это попытками входа и блокировал вход по паролю — больше так не делаем.
 
+    let mut res = vk_send(&state, &method, &form, &token, ua).await?;
+    // «Слишком много запросов в секунду» (6) — просто повторяем чуть позже.
+    // Flood control (9) не долбим повторами: от них ВК только дольше держит ограничение.
+    for wait_ms in [700u64, 1500] {
+        let code = res.get("error").and_then(|e| e["error_code"].as_i64()).unwrap_or(0);
+        if code != 6 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+        res = vk_send(&state, &method, &form, &token, ua).await?;
+    }
     if let Some(err) = res.get("error") {
         let code = err["error_code"].as_i64().unwrap_or(0);
         let msg = err["error_msg"].as_str().unwrap_or("Ошибка ВКонтакте");
@@ -498,8 +517,13 @@ async fn vk_call(
                 return Err(format!("ВК не принял ключ с этого IP — выключите или смените VPN ({msg})"));
             }
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            if token_alive(&state, &token, &ua).await != Some(false) {
+            if token_alive(&state, &token, ua).await != Some(false) {
                 return Err(format!("ВК временно не ответил, попробуйте ещё раз ({msg})"));
+            }
+            // Ключ отозван — пробуем тихо войти заново через сохранённый вход ВК и повторить запрос
+            if let Some(new) = relogin_once(&app, &state, &token, true).await {
+                let res = vk_send(&state, &method, &form, &new.token, new.user_agent()).await?;
+                return vk_result(res);
             }
             // Ключ действительно отозван (вышли на всех устройствах, сменили пароль и т. п.)
             let still_same = state.session.lock().unwrap().as_ref().map(|s| s.token == token).unwrap_or(false);
@@ -511,7 +535,244 @@ async fn vk_call(
         }
         return Err(format!("{msg} (код {code})"));
     }
+    vk_result(res)
+}
+
+async fn vk_send(state: &AppState, method: &str, form: &[(String, String)], token: &str, ua: &str) -> Result<Value, String> {
+    let mut form = form.to_vec();
+    form.push(("access_token".into(), token.to_string()));
+    state
+        .http
+        .post(format!("https://api.vk.com/method/{method}"))
+        .header("User-Agent", ua)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|_| "Нет соединения с ВКонтакте".to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn vk_result(res: Value) -> Result<Value, String> {
+    if let Some(err) = res.get("error") {
+        let code = err["error_code"].as_i64().unwrap_or(0);
+        let msg = err["error_msg"].as_str().unwrap_or("Ошибка ВКонтакте");
+        return Err(format!("{msg} (код {code})"));
+    }
     Ok(res.get("response").cloned().unwrap_or(Value::Null))
+}
+
+// ---------- Тихий повторный вход ----------
+// Если ВК отозвал ключ, но в окне входа ВК (его cookies лежат в папке data\webview)
+// аккаунт всё ещё авторизован, ВК выдаёт новый ключ без единого клика — в скрытом окне.
+
+static RELOGIN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static LAST_RELOGIN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+async fn relogin_once(app: &AppHandle, state: &AppState, old_token: &str, urgent: bool) -> Option<Session> {
+    let _g = RELOGIN.lock().await;
+    let cur = state.session.lock().unwrap().clone()?;
+    if cur.token != old_token {
+        return Some(cur); // ключ уже обновил параллельный запрос
+    }
+    // Скрытый вход работает только для ключа из окна Kate Mobile (там сохранён вход ВК).
+    // Для QR и входа по паролю он бесполезен и лишь копит «попытки входа» у ВК.
+    if cur.client != "kate" {
+        return None;
+    }
+    // И даже для Kate — не чаще раза в 30 минут
+    let gap = if urgent { 1800 } else { 3600 };
+    let last = LAST_RELOGIN.load(std::sync::atomic::Ordering::Relaxed);
+    if now_secs() - last < gap {
+        return None;
+    }
+    LAST_RELOGIN.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+    let mut s = silent_relogin(app, cur.user_id).await?;
+    s.name = cur.name.clone();
+    s.photo = cur.photo.clone();
+    save_session(app, Some(&s));
+    *state.session.lock().unwrap() = Some(s.clone());
+    Some(s)
+}
+
+async fn silent_relogin(app: &AppHandle, user_id: i64) -> Option<Session> {
+    let url = format!(
+        "https://oauth.vk.com/authorize?client_id={CLIENT_ID}&display=page&redirect_uri={REDIRECT}\
+         &scope=audio,offline&response_type=token&v={API_VERSION}"
+    );
+    if let Some(w) = app.get_webview_window("vk-silent") {
+        let _ = w.close();
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx: Reply = Arc::new(Mutex::new(Some(tx)));
+    let tx_nav = tx.clone();
+    let win = WebviewWindowBuilder::new(app, "vk-silent", WebviewUrl::External(url.parse().ok()?))
+        .title("Melo")
+        .data_directory(webview_dir())
+        .visible(false)
+        .skip_taskbar(true)
+        .focused(false)
+        .inner_size(480.0, 600.0)
+        .on_navigation(move |u| match parse_redirect(u) {
+            Some(res) => {
+                reply(&tx_nav, res);
+                false
+            }
+            None => true,
+        })
+        .build()
+        .ok()?;
+    let tx_poll = tx.clone();
+    let poll_win = win.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if tx_poll.lock().unwrap().is_none() {
+                break;
+            }
+            match poll_win.url() {
+                Ok(u) => {
+                    if let Some(res) = parse_redirect(&u) {
+                        reply(&tx_poll, res);
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let res = tokio::time::timeout(Duration::from_secs(12), rx).await;
+    reply(&tx, Err(String::new()));
+    let _ = win.close();
+    match res {
+        Ok(Ok(Ok(s))) if s.user_id == user_id => Some(s),
+        _ => None,
+    }
+}
+
+// ---------- Вход через браузер ----------
+// Открываем страницу ВК в браузере пользователя (там он обычно уже вошёл), он жмёт
+// «Разрешить» и копирует адрес страницы — Melo сам замечает его в буфере обмена.
+
+static BROWSER_LOGIN: Mutex<Option<Reply>> = Mutex::new(None);
+
+fn open_in_browser(url: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Ищет в тексте адрес oauth.vk.com/blank.html#access_token=…
+fn token_from_text(text: &str) -> Option<Result<Session, String>> {
+    let i = text.find("oauth.vk.com/blank.html").or_else(|| text.find("oauth.vk.ru/blank.html"))?;
+    let rest = text[i..].split_whitespace().next()?.trim_end_matches(['"', '\'', '>', ')']);
+    let u = Url::parse(&format!("https://{rest}")).ok()?;
+    parse_redirect(&u)
+}
+
+fn browser_auth_url() -> String {
+    format!(
+        "https://oauth.vk.com/authorize?client_id={CLIENT_ID}&display=page&redirect_uri={REDIRECT}\
+         &scope=audio,offline&response_type=token&v={API_VERSION}"
+    )
+}
+
+#[tauri::command]
+async fn vk_browser_login(app: AppHandle, state: State<'_, AppState>) -> Result<i64, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx: Reply = Arc::new(Mutex::new(Some(tx)));
+    if let Some(old) = BROWSER_LOGIN.lock().unwrap().replace(tx.clone()) {
+        reply(&old, Err("Вход отменён".into()));
+    }
+    open_in_browser(&browser_auth_url())?;
+
+    // Следим за буфером обмена: как только там появится адрес с ключом — входим
+    let tx_clip = tx.clone();
+    std::thread::spawn(move || {
+        let mut cb = arboard::Clipboard::new().ok();
+        let initial = cb.as_mut().and_then(|c| c.get_text().ok());
+        let started = std::time::Instant::now();
+        while tx_clip.lock().unwrap().is_some() && started.elapsed() < Duration::from_secs(900) {
+            std::thread::sleep(Duration::from_millis(500));
+            if cb.is_none() {
+                cb = arboard::Clipboard::new().ok();
+            }
+            let Some(c) = cb.as_mut() else { continue };
+            let Ok(text) = c.get_text() else { continue };
+            if initial.as_deref() == Some(text.as_str()) {
+                continue;
+            }
+            if let Some(res) = token_from_text(&text) {
+                if res.is_ok() {
+                    let _ = c.clear(); // не оставляем ключ в буфере обмена
+                }
+                reply(&tx_clip, res);
+                break;
+            }
+        }
+        reply(&tx_clip, Err("Время ожидания входа истекло — попробуйте ещё раз".into()));
+    });
+
+    let result = rx.await.unwrap_or_else(|_| Err("Вход отменён".into()));
+    {
+        let mut cur = BROWSER_LOGIN.lock().unwrap();
+        if cur.as_ref().map(|c| Arc::ptr_eq(c, &tx)).unwrap_or(false) {
+            *cur = None;
+        }
+    }
+    let session = result?;
+    let uid = session.user_id;
+    save_session(&app, Some(&session));
+    *state.session.lock().unwrap() = Some(session);
+    show_main(&app);
+    Ok(uid)
+}
+
+/// Адрес страницы, вставленный вручную.
+/// Если вход ещё ждёт — отдаём ключ ему (вернётся None); если ожидание уже закончилось
+/// (ошибка, перезапуск) — входим сразу сами и возвращаем id пользователя.
+#[tauri::command]
+fn vk_browser_submit(app: AppHandle, state: State<'_, AppState>, text: String) -> Result<Option<i64>, String> {
+    let res = token_from_text(&text).ok_or("В адресе нет ключа входа. Нажмите «Разрешить» в браузере и скопируйте адрес страницы целиком.")?;
+    {
+        let cur = BROWSER_LOGIN.lock().unwrap();
+        if let Some(tx) = cur.as_ref() {
+            if tx.lock().unwrap().is_some() {
+                reply(tx, res);
+                return Ok(None);
+            }
+        }
+    }
+    let session = res?;
+    let uid = session.user_id;
+    save_session(&app, Some(&session));
+    *state.session.lock().unwrap() = Some(session);
+    show_main(&app);
+    Ok(Some(uid))
+}
+
+#[tauri::command]
+fn vk_browser_reopen() -> Result<(), String> {
+    open_in_browser(&browser_auth_url())
+}
+
+#[tauri::command]
+fn vk_browser_cancel() {
+    if let Some(tx) = BROWSER_LOGIN.lock().unwrap().take() {
+        reply(&tx, Err("Вход отменён".into()));
+    }
 }
 
 /// Жив ли ключ ВК: Some(true) — да, Some(false) — точно отозван, None — не удалось проверить.
@@ -595,7 +856,8 @@ fn take_token(app: &AppHandle, state: &AppState, res: &Value) -> bool {
         return false;
     };
     let user_id = r["user_id"].as_i64().or(res["user_id"].as_i64()).unwrap_or(0);
-    let session = Session { token: token.to_string(), user_id, client: "vk_android".into(), name: None, photo: None };
+    let exp = expiry(r["expires_in"].as_i64().or(res["expires_in"].as_i64()));
+    let session = Session { token: token.to_string(), user_id, client: "vk_android".into(), name: None, photo: None, expires_at: exp };
     save_session(app, Some(&session));
     *state.session.lock().unwrap() = Some(session);
     true
@@ -636,7 +898,7 @@ async fn exchange_super_token(app: &AppHandle, state: &AppState, r: &Value) -> R
                     user_id = u["response"][0]["id"].as_i64().unwrap_or(0);
                 }
             }
-            let session = Session { token: token.to_string(), user_id, client: client.into(), name: None, photo: None };
+            let session = Session { token: token.to_string(), user_id, client: client.into(), name: None, photo: None, expires_at: expiry(d["expires_in"].as_i64()) };
             save_session(app, Some(&session));
             *state.session.lock().unwrap() = Some(session);
             return Ok(());
@@ -727,6 +989,224 @@ async fn qr_submit_code(app: AppHandle, state: State<'_, AppState>, hash: String
     };
     Ok(QrStatus { state: st.into(), raw: res["response"].clone() })
 }
+
+
+// ---------- Вход по номеру/почте и паролю (прямая авторизация как у приложения VK для Android) ----------
+// Страница VK ID для сторонних приложений (Kate Mobile) часто отвечает «Слишком много попыток [9]»,
+// поэтому логин и пароль уходят напрямую в oauth.vk.com/token от имени официального клиента.
+// Пароль нигде не сохраняется.
+
+#[derive(Serialize, Default)]
+struct DirectAuth {
+    /// "ok", "code" (нужен код 2FA), "captcha", "error"
+    state: String,
+    uid: Option<i64>,
+    sid: Option<String>,
+    img: Option<String>,
+    phone: Option<String>,
+    /// "sms" или "app" — откуда ждать код
+    kind: Option<String>,
+    msg: Option<String>,
+}
+
+fn direct_err(msg: impl Into<String>) -> DirectAuth {
+    DirectAuth { state: "error".into(), msg: Some(msg.into()), ..Default::default() }
+}
+
+/// Окно ВК для дополнительной проверки (ВК иногда просит подтвердить вход на своей странице).
+async fn validation_window(app: &AppHandle, url: &str) -> Result<Session, String> {
+    if let Some(w) = app.get_webview_window("vk-check") {
+        let _ = w.close();
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let tx: Reply = Arc::new(Mutex::new(Some(tx)));
+    let tx_nav = tx.clone();
+    let win = WebviewWindowBuilder::new(app, "vk-check", WebviewUrl::External(url.parse().map_err(|_| "bad url")?))
+        .title("Подтверждение входа ВКонтакте")
+        .data_directory(webview_dir())
+        .inner_size(520.0, 700.0)
+        .center()
+        .on_navigation(move |u| match parse_redirect(u) {
+            Some(res) => {
+                reply(&tx_nav, res);
+                false
+            }
+            None => true,
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+    let tx_close = tx.clone();
+    win.on_window_event(move |e| {
+        if let WindowEvent::Destroyed = e {
+            reply(&tx_close, Err("Вход отменён".into()));
+        }
+    });
+    let tx_poll = tx.clone();
+    let poll_win = win.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            if tx_poll.lock().unwrap().is_none() {
+                break;
+            }
+            match poll_win.url() {
+                Ok(u) => {
+                    if let Some(res) = parse_redirect(&u) {
+                        reply(&tx_poll, res);
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    let res = rx.await.unwrap_or_else(|_| Err("Вход отменён".into()));
+    if let Some(w) = app.get_webview_window("vk-check") {
+        let _ = w.close();
+    }
+    res
+}
+
+#[tauri::command]
+async fn vk_direct_login(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    login: String,
+    password: String,
+    code: Option<String>,
+    sms: Option<bool>,
+    captcha_sid: Option<String>,
+    captcha_key: Option<String>,
+) -> Result<DirectAuth, String> {
+    let login = login.trim().replace([' ', '(', ')', '-'], "");
+    let mut q: Vec<(&str, String)> = vec![
+        ("grant_type", "password".into()),
+        ("client_id", VKA_ID.into()),
+        ("client_secret", VKA_SECRET.into()),
+        ("username", login.clone()),
+        ("password", password),
+        ("v", API_VERSION.into()),
+        ("2fa_supported", "1".into()),
+        ("lang", "ru".into()),
+    ];
+    if let Some(c) = code.as_deref().map(|c| c.trim()).filter(|c| !c.is_empty()) {
+        q.push(("code", c.to_string()));
+    }
+    if sms.unwrap_or(false) {
+        q.push(("force_sms", "1".into()));
+    }
+    if let (Some(sid), Some(key)) = (captcha_sid, captcha_key) {
+        q.push(("captcha_sid", sid));
+        q.push(("captcha_key", key.trim().to_string()));
+    }
+    let res: Value = state
+        .http
+        .get("https://oauth.vk.com/token")
+        .header("User-Agent", VKA_UA)
+        .query(&q)
+        .send()
+        .await
+        .map_err(|_| "Нет соединения с ВКонтакте".to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if let Some(token) = res["access_token"].as_str() {
+        let session = Session {
+            token: token.to_string(),
+            user_id: res["user_id"].as_i64().unwrap_or(0),
+            client: "vk_android".into(),
+            name: None,
+            photo: None,
+            expires_at: expiry(res["expires_in"].as_i64()),
+        };
+        let uid = session.user_id;
+        save_session(&app, Some(&session));
+        *state.session.lock().unwrap() = Some(session);
+        return Ok(DirectAuth { state: "ok".into(), uid: Some(uid), ..Default::default() });
+    }
+
+    let err = res["error"].as_str().unwrap_or_default();
+    let desc = res["error_description"].as_str().unwrap_or_default();
+    match err {
+        "need_captcha" => Ok(DirectAuth {
+            state: "captcha".into(),
+            sid: res["captcha_sid"].as_str().map(String::from).or(res["captcha_sid"].as_i64().map(|v| v.to_string())),
+            img: res["captcha_img"].as_str().map(String::from),
+            ..Default::default()
+        }),
+        "need_validation" => {
+            if let Some(kind) = res["validation_type"].as_str() {
+                let sid = res["validation_sid"].as_str().map(String::from);
+                let is_sms = kind.contains("sms");
+                if is_sms {
+                    if let Some(sid) = sid.as_deref() {
+                        // Просим ВК отправить СМС с кодом
+                        let _ = state
+                            .http
+                            .get("https://api.vk.com/method/auth.validatePhone")
+                            .header("User-Agent", VKA_UA)
+                            .query(&[("sid", sid), ("api_id", VKA_ID), ("v", API_VERSION)])
+                            .send()
+                            .await;
+                    }
+                }
+                return Ok(DirectAuth {
+                    state: "code".into(),
+                    sid,
+                    phone: res["phone_mask"].as_str().map(String::from),
+                    kind: Some(if is_sms { "sms".into() } else { "app".into() }),
+                    msg: (code.is_some()).then(|| "Неверный код. Проверьте его и попробуйте ещё раз.".to_string()),
+                    ..Default::default()
+                });
+            }
+            if let Some(url) = res["redirect_uri"].as_str() {
+                // ВК хочет подтвердить вход на своей странице — открываем её и ловим ключ
+                let mut session = validation_window(&app, url).await?;
+                session.client = "vk_android".into();
+                let uid = session.user_id;
+                save_session(&app, Some(&session));
+                *state.session.lock().unwrap() = Some(session);
+                return Ok(DirectAuth { state: "ok".into(), uid: Some(uid), ..Default::default() });
+            }
+            Ok(direct_err(if desc.is_empty() { "ВК просит дополнительную проверку" } else { desc }))
+        }
+        "invalid_client" | "invalid_request" => {
+            let low = desc.to_lowercase();
+            let msg = if low.contains("password") || low.contains("username") || low.contains("логин") {
+                "Неверный номер, почта или пароль".to_string()
+            } else if low.contains("code") || low.contains("код") {
+                "Неверный код. Проверьте его и попробуйте ещё раз.".to_string()
+            } else if desc.is_empty() {
+                "ВК не принял вход".to_string()
+            } else {
+                desc.to_string()
+            };
+            Ok(direct_err(msg))
+        }
+        "" => Ok(direct_err(format!("Неожиданный ответ ВК: {res}"))),
+        _ => Ok(direct_err(if desc.is_empty() { err.to_string() } else { format!("{desc} ({err})") })),
+    }
+}
+
+/// Убирает браузерные подсказки WebView2 («Сохранённые сведения», сохранение паролей) в окне Melo.
+#[cfg(windows)]
+fn disable_autofill(w: &tauri::WebviewWindow) {
+    let _ = w.with_webview(|wv| unsafe {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4;
+        use windows_core::Interface;
+        if let Ok(core) = wv.controller().CoreWebView2() {
+            if let Ok(settings) = core.Settings() {
+                if let Ok(s4) = settings.cast::<ICoreWebView2Settings4>() {
+                    let _ = s4.SetIsGeneralAutofillEnabled(false);
+                    let _ = s4.SetIsPasswordAutosaveEnabled(false);
+                }
+            }
+        }
+    });
+}
+#[cfg(not(windows))]
+fn disable_autofill(_w: &tauri::WebviewWindow) {}
 
 // ---------- Эффекты окна (стекло) ----------
 
@@ -952,6 +1432,24 @@ fn serve_stream(req: tiny_http::Request, client: &reqwest::blocking::Client, app
     if req.method() == &tiny_http::Method::Options {
         return fail(req, 204);
     }
+    // Офлайн-плейлисты: local?p=плейлист/файл и cover?p=плейлист/файл
+    if let Some(rest) = req.url().strip_prefix(prefix).map(str::to_string) {
+        if rest.starts_with("local?") || rest.starts_with("cover?") {
+            let rel = Url::parse(&format!("http://x/{rest}"))
+                .ok()
+                .and_then(|u| u.query_pairs().find(|(k, _)| k == "p").map(|(_, v)| v.into_owned()));
+            let Some(path) = rel.and_then(|r| offline::resolve(&r)) else {
+                return fail(req, 404);
+            };
+            let hs: Vec<tiny_http::Header> = cors.iter().flatten().cloned().collect();
+            if rest.starts_with("cover?") {
+                offline::serve_cover(req, &path, hs);
+            } else {
+                offline::serve_file(req, &path, hs);
+            }
+            return;
+        }
+    }
     let Some(target) = req
         .url()
         .strip_prefix(prefix)
@@ -1132,6 +1630,8 @@ pub fn run() {
     std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &wv);
 
     tauri::Builder::default()
+        // Повторный запуск (ярлык, меню «Пуск») не открывает вторую копию, а показывает уже открытое окно
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .manage(AppState { session: Mutex::new(None), http, anon: Mutex::new(None), stream_base: Mutex::new(String::new()), close_to_tray: std::sync::atomic::AtomicBool::new(false), tray: Mutex::new(TrayState::default()) })
         .setup(|app| {
             cleanup_old_exe();
@@ -1140,9 +1640,10 @@ pub fn run() {
             *app.state::<AppState>().session.lock().unwrap() = session;
             if app.get_webview_window("main").is_none() {
                 if let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() {
-                    WebviewWindowBuilder::from_config(app.handle(), &cfg)?
+                    let w = WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                         .data_directory(webview_dir())
                         .build()?;
+                    disable_autofill(&w);
                 }
             }
             setup_tray(app)?;
@@ -1175,7 +1676,7 @@ pub fn run() {
                 responder.respond(proxy(app, request).await);
             });
         })
-        .invoke_handler(tauri::generate_handler![vk_login, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install])
+        .invoke_handler(tauri::generate_handler![offline::offline_root_path, offline::offline_list, offline::offline_playlist, offline::offline_tracks, offline::offline_create, offline::offline_update, offline::offline_delete_playlist, offline::offline_delete_track, offline::offline_add_files, offline::offline_add_paths, offline::offline_pick_cover, offline::offline_open, vk_direct_login, vk_login, vk_browser_login, vk_browser_submit, vk_browser_reopen, vk_browser_cancel, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install])
         .run(tauri::generate_context!())
         .expect("ошибка при запуске приложения");
 }

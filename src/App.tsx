@@ -10,12 +10,17 @@ import { LyricsPanel } from "./components/LyricsPanel";
 import { Toasts } from "./components/Toasts";
 import { Tooltip } from "./components/Tooltip";
 import { Effects } from "./components/Effects";
+import { OfflineDrop } from "./components/OfflineDrop";
 import { Home } from "./pages/Home";
 import { Playlists } from "./pages/Playlists";
 import { Library } from "./pages/Library";
 import { Explore } from "./pages/Explore";
 import { PlaylistPage } from "./pages/PlaylistPage";
 import { SearchPage } from "./pages/SearchPage";
+import { ArtistPage } from "./pages/ArtistPage";
+import { DeepSearch } from "./pages/DeepSearch";
+import { Offline } from "./pages/Offline";
+import { OfflinePlaylist } from "./pages/OfflinePlaylist";
 import { Login } from "./pages/Login";
 import { Settings } from "./pages/Settings";
 import { SettingsProvider, useSettings } from "./store/settings";
@@ -128,15 +133,21 @@ function Shell() {
     if (r.name === "playlists") return <Playlists />;
     if (r.name === "explore") return <Explore />;
     if (r.name === "settings") return <Settings />;
+    if (r.name === "artist") return <ArtistPage key={r.artist.id ?? r.artist.name} artist={r.artist} />;
+    if (r.name === "offline") return <Offline />;
+    if (r.name === "offline-pl") return <OfflinePlaylist key={r.id} id={r.id} />;
+    if (r.name === "deep") return <DeepSearch artist={r.artist} title={r.title} />;
     return <PlaylistPage key={r.playlist.id} playlist={r.playlist} />;
   };
 
   return (
     <div className="app app-in">
       <Effects />
+      <OfflineDrop />
       <TitleBar
         query={ui.query}
         onQuery={ui.setQuery}
+        onDeep={() => ui.navigate({ name: "deep" })}
         canBack={ui.canBack}
         canForward={ui.canForward}
         onBack={ui.back}
@@ -144,7 +155,7 @@ function Shell() {
       />
       <Sidebar />
       <main className="main" ref={mainRef}>
-        <div className="page-anim" key={ui.query.trim() ? "search" : r.name === "playlist" ? `pl-${r.playlist.id}` : r.name}>
+        <div className="page-anim" key={ui.query.trim() ? "search" : r.name === "playlist" ? `pl-${r.playlist.id}` : r.name === "artist" ? `ar-${r.artist.id ?? r.artist.name}` : r.name === "offline-pl" ? `off-${r.id}` : r.name}>
           {page()}
         </div>
       </main>

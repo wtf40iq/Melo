@@ -1,5 +1,6 @@
 import { MusicApi } from "./types";
-import { Playlist, Track } from "../types";
+import { coverage, rankTracks, trackArtists } from "./match";
+import { OfflinePlaylist, Playlist, Track } from "../types";
 
 // Демо-режим для предпросмотра в браузере: без ВК, с тестовым звуком.
 let uid = 1000;
@@ -37,6 +38,10 @@ const pls: Playlist[] = ["Ночная поездка", "Под учёбу", "Ph
   id: `1_${i + 1}`, ownerId: 1, playlistId: i + 1, title, subtitle: "", count: 8, editable: true,
 }));
 
+let offline: OfflinePlaylist[] = [{ id: "В дорогу", title: "В дорогу", description: "Скачанное на телефон и в машину", count: 0 }];
+const offTracks = (id: string): Track[] =>
+  id === "В дорогу" ? mine.slice(0, 4).map((x) => ({ ...x, id: `off:${id}/${x.title}.mp3`, ownerId: 0, url: "/demo.mp3" })) : [];
+
 const wait = <T,>(v: T) => new Promise<T>((r) => setTimeout(() => r(v), 250));
 const pick = (seed: number, n: number) => all().filter((_, i) => (i * 7 + seed) % 3 !== 0).slice(0, n);
 
@@ -44,6 +49,11 @@ export const demoApi: MusicApi = {
   demo: true,
   restore: () => wait(null),
   login: () => wait({ id: 1, name: "skymywex" }),
+  browserLogin: () => new Promise((r) => setTimeout(() => r({ id: 1, name: "skymywex" }), 4000)),
+  browserSubmit: () => wait(null),
+  directLogin: async (p) => (p.code ? { state: "ok", uid: 1, profile: await demoApi.login() } : { state: "code", kind: "sms", phone: "+7 *** *** ** 27", sid: "1" }),
+  browserReopen: () => wait(undefined),
+  browserCancel: () => wait(undefined),
   logout: () => wait(undefined),
   qrStart: () => wait({ url: "https://qr.vk.ru/ca?q=DEMO42", hash: "demo", expires_at: Date.now() / 1000 + 300 }),
   qrCheck: () => wait({ state: "waiting" as const, raw: 0 }),
@@ -54,12 +64,35 @@ export const demoApi: MusicApi = {
   playlistTracks: (pl) => wait(pick(pl.playlistId, 8)),
   recommendations: () => wait([...other, ...mine.slice(3)]),
   popular: (g) => wait(pick(g ?? 0, 12)),
-  search: async (q) => {
-    const s = q.toLowerCase();
-    return wait({
-      tracks: all().filter((x) => `${x.artist} ${x.title}`.toLowerCase().includes(s)),
-      playlists: pls.filter((p) => p.title.toLowerCase().includes(s)),
-    });
+  searchTracks: (q) => wait(rankTracks(all().filter((x) => coverage(q, `${x.artist} ${x.title}`) >= 0.5), { any: q })),
+  searchExtras: (q) => {
+    const names = [...new Set(all().flatMap(trackArtists))].filter((n) => coverage(q, n) >= 1 || coverage(n, q) >= 1);
+    return wait({ playlists: pls.filter((p) => coverage(q, p.title) >= 0.5), artists: names.map((name) => ({ name })) });
+  },
+  deepSearch: (artist, title) => wait(rankTracks(all(), { artist: artist || undefined, title: title || undefined }, true)),
+  variants: (t) => wait([
+    { ...t, id: `${t.id}_u`, audioId: t.audioId + 1, ownerId: t.ownerId + 7, title: `${t.title} (без цензуры)`, explicit: true },
+    { ...t, id: `${t.id}_e`, audioId: t.audioId + 2, ownerId: t.ownerId + 9, explicit: true, duration: t.duration + 1 },
+    { ...t, id: `${t.id}_c`, audioId: t.audioId + 3, title: `${t.title} (Clean)`, explicit: false },
+  ]),
+  artistInfo: (a) => wait(a),
+  artistTracks: (a) => wait(all().filter((x) => trackArtists(x).some((n) => n.toLowerCase() === a.name.toLowerCase()))),
+  artistAlbums: (a) => wait(pls.slice(0, 2).map((p) => ({ ...p, subtitle: a.name }))),
+  offlineRoot: () => wait("C:\\Users\\you\\AppData\\Local\\Melo\\Offline"),
+  offlineList: () => wait(offline.map((o) => ({ ...o, count: offTracks(o.id).length }))),
+  offlinePlaylist: (id) => wait({ ...offline.find((o) => o.id === id)!, count: offTracks(id).length }),
+  offlineTracks: (id) => wait(offTracks(id)),
+  offlineCreate: async (title, description) => { offline.push({ id: title, title, description, count: 0 }); return wait(title); },
+  offlineUpdate: async (id, title, description) => { const o = offline.find((x) => x.id === id); if (o) Object.assign(o, { title, description }); },
+  offlineDelete: async (id) => { offline = offline.filter((x) => x.id !== id); },
+  offlineDeleteTrack: async () => {},
+  offlineAddFiles: () => wait(0),
+  offlineAddPaths: (_id, paths) => wait(paths.length),
+  offlinePickCover: () => wait(false),
+  offlineOpen: () => wait(undefined),
+  artist: (a) => {
+    const tracks = all().filter((x) => trackArtists(x).some((n) => n.toLowerCase() === a.name.toLowerCase()));
+    return wait({ artist: a, tracks, albums: pls.slice(0, 2).map((p) => ({ ...p, subtitle: a.name })) });
   },
   add: async (tr) => {
     const copy = { ...tr, audioId: uid, id: `1_${uid++}` };

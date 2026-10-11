@@ -4,6 +4,7 @@ import { useLibrary } from "../store/library";
 import { usePlayer } from "../store/player";
 import { Track, formatTime } from "../types";
 import { Cover } from "./Cover";
+import { ArtistLinks } from "./ArtistLinks";
 import { TrackMenu } from "./TrackMenu";
 import { useSettings } from "../store/settings";
 
@@ -14,6 +15,8 @@ type Props = {
   onMove?: (from: number, to: number) => void;
   /** Если задано — в меню трека есть «Удалить из плейлиста». */
   onRemove?: (t: Track, index: number) => void;
+  /** Подпись пункта удаления в меню */
+  removeLabel?: string;
 };
 
 /** Сколько строк рисуем сверх видимых сверху и снизу. */
@@ -64,20 +67,20 @@ const Row = memo(function Row({ t, i, current, playing, liked, showAlbum, sortab
           <b>{t.title}</b>
           <small>
             {t.explicit && <em className="explicit">E</em>}
-            {t.artist}
+            <ArtistLinks track={t} />
           </small>
         </span>
       </span>
       {showAlbum && <span className="tl-album">{t.album ?? ""}</span>}
       <span className="tl-like">
-        <button
+        {!t.id.startsWith("off:") && <button
           className={`icon-btn sm ${liked ? "liked" : ""}`}
           onClick={() => h.like(i)}
           aria-label={tr(liked ? "Удалить из моей музыки" : "Добавить в мою музыку")}
           data-tip={tr(liked ? "Удалить из моей музыки" : "Добавить в мою музыку")}
         >
           <Heart key={String(liked)} className={liked ? "heart-pop" : ""} size={16} fill={liked ? "currentColor" : "none"} />
-        </button>
+        </button>}
       </span>
       <span className="tl-time">{formatTime(t.duration)}</span>
       <span className="tl-more">
@@ -96,7 +99,7 @@ const Row = memo(function Row({ t, i, current, playing, liked, showAlbum, sortab
   );
 });
 
-export function TrackList({ tracks, showAlbum = true, onMove, onRemove }: Props) {
+export function TrackList({ tracks, showAlbum = true, onMove, onRemove, removeLabel }: Props) {
   const p = usePlayer();
   const lib = useLibrary();
   const s = useSettings();
@@ -286,7 +289,7 @@ export function TrackList({ tracks, showAlbum = true, onMove, onRemove }: Props)
       <div ref={bodyRef} className="tl-body" style={{ height: tracks.length * rowH }}>
         {rows}
       </div>
-      {menu && <TrackMenu track={menu.track} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onRemove={onRemove ? () => onRemove(menu.track, menu.i) : undefined} />}
+      {menu && <TrackMenu track={menu.track} x={menu.x} y={menu.y} onClose={() => setMenu(null)} onRemove={onRemove ? () => onRemove(menu.track, menu.i) : undefined} removeLabel={removeLabel} />}
     </div>
   );
 }

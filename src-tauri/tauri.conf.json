@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Melo",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "identifier": "com.skymywex.melo",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -20,7 +20,7 @@
         "decorations": false,
         "center": true,
         "transparent": true,
-        "dragDropEnabled": false,
+        "dragDropEnabled": true,
         "label": "main",
         "shadow": true,
         "create": false

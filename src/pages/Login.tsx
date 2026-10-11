@@ -1,11 +1,11 @@
 import { Logo } from "../components/Logo";
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Check, Globe, KeyRound, Loader2, Lock, RefreshCw, Smartphone } from "lucide-react";
+import { AppWindow, ArrowLeft, Check, Hourglass, KeyRound, Loader2, Lock, MessageSquare, RefreshCw, Smartphone } from "lucide-react";
 import { acceptTerms, termsAccepted } from "../legal";
 import { LegalDialog } from "../components/LegalDialog";
 import { createQR } from "@vkontakte/vk-qr";
 import { api } from "../api";
-import { QrCode } from "../api/types";
+import { DirectAuth, QrCode } from "../api/types";
 import { lastVkKick, useLibrary } from "../store/library";
 import { useT } from "../store/settings";
 import { errorText } from "../store/ui";
@@ -32,12 +32,98 @@ export function Login() {
   const [agreed, setAgreed] = useState(termsAccepted);
   const [doc, setDoc] = useState<"terms" | "privacy" | null>(null);
   const agree = (v: boolean) => { setAgreed(v); acceptTerms(v); };
+  // ВК ответил Flood control — ключ уже есть, ждём и сами пробуем ещё раз
+  const [wait, setWait] = useState<{ uid: string; until: number } | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const [winError, setWinError] = useState("");
+  const onLoginError = (e: unknown) => {
+    const m = String(e).match(/FLOOD:(\d+)/);
+    if (m) {
+      setWait((w) => ({ uid: m[1], until: Date.now() + (w ? 120_000 : 60_000) }));
+      return true;
+    }
+    setWinError(t(errorText(e)));
+    return false;
+  };
+  const loginWindow = async () => {
+    setBusy(true);
+    setWinError("");
+    try {
+      await lib.login();
+    } catch (e) {
+      onLoginError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (!wait) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [wait]);
+  const left = wait ? Math.max(0, Math.ceil((wait.until - now) / 1000)) : 0;
+  const retryNow = async () => {
+    setBusy(true);
+    try {
+      await lib.finishLogin();
+      setWait(null);
+    } catch (e) {
+      onLoginError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (wait && left === 0 && !busy) retryNow();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [left, wait]);
+
+  // Вход по номеру/почте и паролю
+  const [showPass, setShowPass] = useState(false);
+  const [dStep, setDStep] = useState<"form" | "code" | "captcha">("form");
+  const [dLogin, setDLogin] = useState("");
+  const [dPass, setDPass] = useState("");
+  const [dCode, setDCode] = useState("");
+  const [dCaptcha, setDCaptcha] = useState("");
+  const [dInfo, setDInfo] = useState<DirectAuth | null>(null);
+  const [dBusy, setDBusy] = useState(false);
+  const [dError, setDError] = useState("");
+  const direct = async (opts: { sms?: boolean } = {}) => {
+    if (dBusy || !dLogin.trim() || !dPass) return;
+    setDBusy(true);
+    setDError("");
+    setWinError("");
+    try {
+      const r = await api.directLogin({
+        login: dLogin, password: dPass,
+        code: dStep === "code" && !opts.sms ? dCode : undefined,
+        sms: opts.sms,
+        captchaSid: dStep === "captcha" ? dInfo?.sid : undefined,
+        captchaKey: dStep === "captcha" ? dCaptcha : undefined,
+      });
+      if (r.state === "ok") { setDPass(""); await finish(); return; }
+      if (r.state === "code") { setDInfo(r); setDStep("code"); setDCode(""); if (r.msg) setDError(t(r.msg)); return; }
+      if (r.state === "captcha") { setDInfo(r); setDStep("captcha"); setDCaptcha(""); return; }
+      setDError(t(r.msg || "ВК не принял вход"));
+      if (dStep === "captcha") setDStep("form");
+    } catch (e) {
+      if (!onLoginError(e)) setDError(t(errorText(e)));
+    } finally {
+      setDBusy(false);
+    }
+  };
+  const onDirectSubmit = (e: FormEvent) => { e.preventDefault(); direct(); };
 
   const finish = async () => {
     if (done.current) return;
     done.current = true;
     setPhase("done");
-    await lib.finishLogin();
+    try {
+      await lib.finishLogin();
+    } catch (e) {
+      done.current = false;
+      if (!onLoginError(e)) setAttempt((a) => a + 1);
+    }
   };
 
   // Получаем QR-код и опрашиваем ВК, пока вход не подтвердят
@@ -162,6 +248,7 @@ export function Login() {
             <div className="login-kick">{t("ВКонтакте завершил сессию — войдите снова.")}{kick && <small>{kick}</small>}</div>
           )}
 
+          <span className="login-lead">{t("Самый быстрый вход — по QR-коду: пароль не нужен, ВК его не ограничивает.")}</span>
           <ol className="login-steps">
             <li><Smartphone size={16} /> {t("Откройте камеру или приложение ВК на телефоне")}</li>
             <li><span className="qr-mini" /> {t("Наведите на QR-код справа")}</li>
@@ -169,14 +256,45 @@ export function Login() {
           </ol>
 
           <div className="login-or"><span>{t("или")}</span></div>
-          <button
-            className="btn secondary wide"
-            disabled={busy || lib.booting || !agreed}
-            onClick={async () => { setBusy(true); await lib.login(); setBusy(false); }}
-          >
-            {busy ? <Loader2 size={18} className="spin" /> : <Globe size={18} />}
-            {t(busy ? "Ждём вход в окне ВК…" : "Войти по логину и паролю")}
-          </button>
+          {!showPass ? (
+            <button className="btn secondary wide" disabled={!agreed || lib.booting} onClick={() => setShowPass(true)}>
+              <KeyRound size={18} /> {t("Войти по номеру и паролю")}
+            </button>
+          ) : (
+          <form className="login-methods direct-form" onSubmit={onDirectSubmit} autoComplete="off">
+              {dStep === "form" && <>
+                <input className="dialog-input" name="melo-login" autoComplete="off" spellCheck={false} placeholder={t("Телефон или почта")} value={dLogin} onChange={(e) => setDLogin(e.target.value)} disabled={!agreed || dBusy} />
+                <input className="dialog-input" name="melo-pass" type="password" autoComplete="new-password" placeholder={t("Пароль ВКонтакте")} value={dPass} onChange={(e) => setDPass(e.target.value)} disabled={!agreed || dBusy} />
+              </>}
+              {dStep === "code" && <>
+                <span className="login-hint">
+                  <MessageSquare size={14} /> {dInfo?.kind === "sms"
+                    ? t("Введите код из СМС{p}", { p: dInfo?.phone ? ` (${dInfo.phone})` : "" })
+                    : t("Введите код из приложения ВК или из СМС")}
+                </span>
+                <input className="dialog-input code-input" autoFocus inputMode="numeric" autoComplete="off" placeholder={t("Код")} value={dCode} onChange={(e) => setDCode(e.target.value.replace(/\D/g, "").slice(0, 8))} disabled={dBusy} />
+              </>}
+              {dStep === "captcha" && <>
+                <span className="login-hint">{t("ВК просит ввести символы с картинки")}</span>
+                {dInfo?.img && <img className="captcha-img" src={dInfo.img} alt="" onClick={() => direct()} />}
+                <input className="dialog-input" autoFocus placeholder={t("Символы с картинки")} value={dCaptcha} onChange={(e) => setDCaptcha(e.target.value)} disabled={dBusy} />
+              </>}
+              <button type="submit" className="btn primary wide login-main" disabled={!agreed || dBusy || lib.booting || !dLogin.trim() || !dPass || (dStep === "code" && dCode.length < 4) || (dStep === "captcha" && !dCaptcha.trim())}>
+                {dBusy ? <Loader2 size={18} className="spin" /> : <KeyRound size={18} />}
+                {t(dStep === "form" ? "Войти" : "Подтвердить")}
+              </button>
+              {dError && <span className="login-err">{dError}</span>}
+              {winError && <span className="login-err">{winError}</span>}
+              <div className="login-links">
+                {dStep === "code" && dInfo?.kind !== "sms" && (
+                  <button type="button" className="link-btn" disabled={dBusy} onClick={() => direct({ sms: true })}>{t("Прислать код по СМС")}</button>
+                )}
+                {dStep !== "form" ? (
+                  <button type="button" className="link-btn" onClick={() => { setDStep("form"); setDError(""); }}><ArrowLeft size={13} /> {t("Назад")}</button>
+                ) : null}
+              </div>
+            </form>
+          )}
           <label className={`terms-check ${agreed ? "on" : ""}`}>
             <input type="checkbox" checked={agreed} onChange={(e) => agree(e.target.checked)} />
             <span className="terms-box">{agreed && <Check size={13} strokeWidth={3} />}</span>
@@ -189,7 +307,7 @@ export function Login() {
           </label>
           {doc && <LegalDialog doc={doc} onClose={() => setDoc(null)} />}
           <small>
-            {t(api.demo ? "Сейчас открыт демо-режим: данные ненастоящие." : "Вход идёт на официальной странице ВК. Пароль приложение не видит.")}
+            {t(api.demo ? "Сейчас открыт демо-режим: данные ненастоящие." : "Пароль уходит только во ВКонтакте и нигде не сохраняется.")}
           </small>
         </div>
 
@@ -200,7 +318,18 @@ export function Login() {
               <span>{t("Примите соглашение слева, чтобы появился QR-код")}</span>
             </div>
           )}
-          {agreed && phase === "code" && (
+          {agreed && wait && (
+            <div className="browser-card">
+              <span className="code-icon"><Hourglass size={22} /></span>
+              <b>{t("ВК просит немного подождать")}</b>
+              <span className="code-hint">{t("Вход уже подтверждён (id{id}), но ВК временно ограничил запросы. Melo сам повторит — ничего нажимать не нужно.", { id: wait.uid })}</span>
+              <span className="code-status">
+                {busy ? <><Loader2 size={14} className="spin" /> {t("Проверяем…")}</> : t("Повтор через {n} с", { n: left })}
+              </span>
+              <button type="button" className="link-btn" disabled={busy} onClick={retryNow}><RefreshCw size={13} /> {t("Повторить сейчас")}</button>
+            </div>
+          )}
+          {agreed && !wait && phase === "code" && (
             <form className="code-card" onSubmit={onFormSubmit}>
               <span className="code-icon"><KeyRound size={22} /></span>
               <b>{t("Введите код с телефона")}</b>
@@ -209,7 +338,7 @@ export function Login() {
                 <input
                   autoFocus
                   inputMode="numeric"
-                  autoComplete="one-time-code"
+                  autoComplete="off"
                   aria-label={t("Код с телефона")}
                   value={otp}
                   onChange={(e) => onOtp(e.target.value)}
@@ -230,7 +359,7 @@ export function Login() {
             </form>
           )}
 
-          {agreed && (phase === "waiting" || phase === "scanned" || phase === "expired") && code && (
+          {agreed && !wait && (phase === "waiting" || phase === "scanned" || phase === "expired") && code && (
             <div className="qr-wrap">
               <div
                 className={`qr ${phase !== "waiting" ? "dim" : ""}`}
@@ -244,8 +373,8 @@ export function Login() {
               )}
             </div>
           )}
-          {agreed && (phase === "loading" || phase === "done") && <div className="qr-placeholder"><Loader2 size={28} className="spin" /></div>}
-          {agreed && phase === "error" && (
+          {agreed && !wait && (phase === "loading" || phase === "done") && <div className="qr-placeholder"><Loader2 size={28} className="spin" /></div>}
+          {agreed && !wait && phase === "error" && (
             <div className="qr-placeholder error">
               <span>{t(error)}</span>
               <button className="btn secondary" onClick={() => setAttempt((a) => a + 1)}><RefreshCw size={16} /> {t("Повторить")}</button>
@@ -253,7 +382,7 @@ export function Login() {
           )}
 
           {agreed && phase === "done" && <small className="qr-caption">{t("Входим…")}</small>}
-          {agreed && (phase === "waiting" || phase === "scanned") && (
+          {agreed && !wait && (phase === "waiting" || phase === "scanned") && (
             <button type="button" className="link-btn" onClick={() => { setOtp(""); setOtpError(""); setPhase("code"); }}>
               {t("Телефон показал код?")}
             </button>

@@ -45,6 +45,7 @@ export function TrackMenu({ track, x, y, onClose, onRemove, removeLabel }: Props
   }, [onClose]);
 
   const act = (fn: () => void) => () => { fn(); onClose(); };
+  const off = track.id.startsWith("off:");
   const editable = lib.playlists.filter((p) => p.editable);
 
   return createPortal(
@@ -54,20 +55,20 @@ export function TrackMenu({ track, x, y, onClose, onRemove, removeLabel }: Props
           <button onClick={act(() => player.playNext(track))}><ListStart size={16} /> {t("Играть следующим")}</button>
           <button onClick={act(() => player.enqueue(track))}><ListEnd size={16} /> {t("В конец очереди")}</button>
           <div className="menu-sep" />
-          <button onClick={act(() => lib.toggleMine(track))}>
+          {!off && <button onClick={act(() => lib.toggleMine(track))}>
             {mine ? <><Trash2 size={16} /> {t("Удалить из моей музыки")}</> : <><Plus size={16} /> {t("Добавить в мою музыку")}</>}
-          </button>
-          <button onClick={() => setView("playlists")}><ListPlus size={16} /> {t("Добавить в плейлист…")}</button>
+          </button>}
+          {!off && <button onClick={() => setView("playlists")}><ListPlus size={16} /> {t("Добавить в плейлист…")}</button>}
           {onRemove && (
             <button className="danger" onClick={act(onRemove)}><ListX size={16} /> {t(removeLabel ?? "Удалить из плейлиста")}</button>
           )}
-          <button onClick={act(() => api.similar(track).then((list) => {
+          {!off && <button onClick={act(() => api.similar(track).then((list) => {
             if (!list.length) return ui.toast("Похожих треков не нашлось");
             player.playList([track, ...list]);
             ui.toast("Играет похожее на «{name}»", { name: track.title });
-          }).catch((e) => ui.toast(errorText(e))))}><Radio size={16} /> {t("Слушать похожее")}</button>
+          }).catch((e) => ui.toast(errorText(e))))}><Radio size={16} /> {t("Слушать похожее")}</button>}
           <div className="menu-sep" />
-          <button onClick={act(() => ui.setQuery(track.artist))}><Search size={16} /> {t("Найти исполнителя")}</button>
+          <button onClick={act(() => (track.artists?.[0] ? ui.navigate({ name: "artist", artist: track.artists[0] }) : off ? ui.setQuery(track.artist) : ui.navigate({ name: "artist", artist: { name: track.artist.split(/\s*,\s*/)[0] } })))}><Search size={16} /> {t("Перейти к исполнителю")}</button>
           <button onClick={act(() => navigator.clipboard?.writeText(`${track.artist} — ${track.title}`))}>
             <Copy size={16} /> {t("Скопировать название")}
           </button>

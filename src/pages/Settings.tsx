@@ -4,14 +4,12 @@ import { api } from "../api";
 import { AppInfo } from "../api/types";
 import { useUi } from "../store/ui";
 import { Lang } from "../i18n";
-import { EQ_BANDS, EQ_PRESETS } from "../store/eq";
+import { EqEditor } from "../components/EqPanel";
 import { useLibrary } from "../store/library";
 import { ACCENTS, useSettings } from "../store/settings";
 import { useUpdate } from "../store/update";
 import { LegalDialog } from "../components/LegalDialog";
 import { Dialog } from "../components/Dialog";
-
-const freqLabel = (f: number) => (f >= 1000 ? `${f / 1000}k` : String(f));
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
@@ -76,12 +74,6 @@ export function Settings() {
     ui.toast("Скопировано");
   };
 
-  const setBand = (i: number, v: number) => {
-    const g = [...s.eqGains];
-    g[i] = v;
-    s.set({ eqGains: g, eqPreset: "custom", eqEnabled: true });
-  };
-
   return (
     <div className="page settings">
       <h1 className="page-title">{t("Настройки")}</h1>
@@ -123,42 +115,7 @@ export function Settings() {
           <span>{t("Включить эквалайзер")}</span>
           <Toggle checked={s.eqEnabled} onChange={(v) => s.set({ eqEnabled: v })} label={t("Включить эквалайзер")} />
         </div>
-        <div className={`eq-panel ${s.eqEnabled ? "" : "off"}`}>
-          <div className="chips">
-            {Object.keys(EQ_PRESETS).map((name) => (
-              <button
-                key={name}
-                className={`chip ${s.eqPreset === name ? "active" : ""}`}
-                onClick={() => s.set({ eqPreset: name, eqGains: EQ_PRESETS[name], eqEnabled: true })}
-              >
-                {t(name)}
-              </button>
-            ))}
-            {s.eqPreset === "custom" && <span className="chip active static">{t("Своя настройка")}</span>}
-          </div>
-          <div className="eq-bands">
-            {EQ_BANDS.map((f, i) => (
-              <div key={f} className="eq-band">
-                <span className="eq-val">{s.eqGains[i] > 0 ? "+" : ""}{s.eqGains[i]}</span>
-                <input
-                  type="range"
-                  min={-12}
-                  max={12}
-                  step={1}
-                  value={s.eqGains[i]}
-                  aria-label={`${freqLabel(f)} Hz`}
-                  onChange={(e) => setBand(i, Number(e.target.value))}
-                  onDoubleClick={() => setBand(i, 0)}
-                  style={{ ["--pct" as string]: `${((s.eqGains[i] + 12) / 24) * 100}%` }}
-                />
-                <span className="eq-freq">{freqLabel(f)}</span>
-              </div>
-            ))}
-          </div>
-          <button className="btn secondary sm-btn" onClick={() => s.set({ eqPreset: "Обычный", eqGains: EQ_PRESETS["Обычный"] })}>
-            <RotateCcw size={15} /> {t("Сбросить")}
-          </button>
-        </div>
+        <EqEditor />
       </section>
 
       <section className="set-card">
@@ -231,6 +188,18 @@ export function Settings() {
             <Row title="Радиус"><Range value={s.glowSize} min={100} max={500} step={10} onChange={(v) => s.set({ glowSize: v })} /></Row>
             <Row title="Мягкость"><Range value={s.glowSoft} min={0.2} max={1} step={0.02} onChange={(v) => s.set({ glowSoft: v })} /></Row>
             <Row title="Яркость"><Range value={s.glowPower} min={0.05} max={0.8} step={0.01} onChange={(v) => s.set({ glowPower: v })} /></Row>
+          </div>
+        )}
+        <Row title="Курсор-огонёк" hint="Вместо стрелки мыши — горящий огонёк, который оставляет за собой шлейф">
+          <Toggle checked={s.fireCursor} onChange={(v) => s.set({ fireCursor: v })} label={t("Курсор-огонёк")} />
+        </Row>
+        {s.fireCursor && (
+          <div className="set-sub">
+            <Row title="Цвет пламени">
+              <Seg value={s.fireColor} onChange={(v) => s.set({ fireColor: v })} options={[["fire", "Огонь"], ["blue", "Синий"], ["violet", "Фиолетовый"], ["green", "Зелёный"], ["accent", "Акцент"]]} />
+            </Row>
+            <Row title="Длина шлейфа"><Range value={s.fireTrail} min={0.4} max={2} step={0.05} onChange={(v) => s.set({ fireTrail: v })} /></Row>
+            <Row title="Размер"><Range value={s.fireSize} min={0.6} max={1.8} step={0.05} onChange={(v) => s.set({ fireSize: v })} /></Row>
           </div>
         )}
         <Row title="«Моя волна» в такт музыке" hint="Свечение вокруг «Моей волны» пульсирует под басы">

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { api } from "../api";
 import { usePlayer } from "../store/player";
 import { useSettings } from "../store/settings";
+import { FireCursor } from "./FireCursor";
 
 const inTauri = "__TAURI_INTERNALS__" in window;
 
@@ -287,6 +288,7 @@ export function Effects() {
           style={{ ["--glow-r" as string]: `${s.glowSize}px`, ["--glow-soft" as string]: `${Math.round(s.glowSoft * 100)}%`, opacity: s.glowPower * 0.45 }}
         />
       )}
+      <FireCursor />
     </>
   );
 }

@@ -32,6 +32,13 @@ type Settings = {
   glowSoft: number;
   /** Яркость, 0.05–0.8 */
   glowPower: number;
+  /** Курсор-огонёк со шлейфом вместо системного */
+  fireCursor: boolean;
+  fireColor: "fire" | "blue" | "violet" | "green" | "accent";
+  /** Длина шлейфа, 0.4–2 */
+  fireTrail: number;
+  /** Размер огонька, 0.6–1.8 */
+  fireSize: number;
   /** Свечение «Моей волны» пульсирует в такт */
   heroBeat: boolean;
   /** Живой фон за интерфейсом */
@@ -78,6 +85,10 @@ const defaults: Settings = {
   glowSize: 260,
   glowSoft: 0.62,
   glowPower: 0.35,
+  fireCursor: false,
+  fireColor: "fire",
+  fireTrail: 1,
+  fireSize: 1,
   heroBeat: true,
   bgEffect: "stars",
   glass: "off",

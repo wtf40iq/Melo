@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Compass, Home, Library, ListMusic, LogOut, Settings, UserPlus, X } from "lucide-react";
+import { Check, Compass, HardDrive, Home, Library, ListMusic, LogOut, Settings, UserPlus, X } from "lucide-react";
 import { useSettings } from "../store/settings";
 import { useLibrary } from "../store/library";
 import { usePlayer } from "../store/player";
@@ -56,6 +56,16 @@ export function Sidebar() {
           </button>
         ))}
       </nav>
+
+      <div className="nav nav-offline">
+        <button
+          className={`nav-item ${(r.name === "offline" || r.name === "offline-pl") && !ui.query ? "active" : ""}`}
+          onClick={() => ui.navigate({ name: "offline" })}
+        >
+          <HardDrive size={19} />
+          {t("Офлайн")}
+        </button>
+      </div>
 
       <div className="sidebar-fill" />
 

@@ -9,6 +9,7 @@ type LibraryState = {
   booting: boolean;
   login: () => Promise<void>;
   /** Вызывается после успешного входа по QR. */
+  /** Ошибку бросает дальше — экран входа сам покажет её рядом с кнопкой */
   finishLogin: () => Promise<void>;
   logout: () => Promise<void>;
   tracks: Track[];
@@ -185,16 +186,19 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     booting,
     login: async () => {
       try {
-        setProfile(await api.login());
+        setProfile(await api.login(returnTo != null));
       } catch (e) {
-        if (!String(e).includes("отменён")) fail(e);
+        if (String(e).includes("отменён")) return;
+        if (!String(e).includes("FLOOD:")) fail(e);
+        throw e;
       }
     },
     finishLogin: async () => {
       try {
         setProfile(await api.login());
       } catch (e) {
-        fail(e);
+        if (!String(e).includes("FLOOD:")) fail(e);
+        throw e;
       }
     },
     logout: async () => {

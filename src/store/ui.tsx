@@ -1,5 +1,5 @@
 import { createContext, ReactNode, useCallback, useContext, useRef, useState } from "react";
-import { Playlist } from "../types";
+import { Artist, Playlist } from "../types";
 
 export type Route =
   | { name: "home" }
@@ -7,7 +7,11 @@ export type Route =
   | { name: "playlists" }
   | { name: "explore" }
   | { name: "settings" }
-  | { name: "playlist"; playlist: Playlist };
+  | { name: "playlist"; playlist: Playlist }
+  | { name: "artist"; artist: Artist }
+  | { name: "deep"; artist?: string; title?: string }
+  | { name: "offline" }
+  | { name: "offline-pl"; id: string };
 
 export type ToastParams = Record<string, string | number>;
 export type ToastOptions = { action?: { label: string; run: () => void }; duration?: number };
@@ -33,7 +37,11 @@ type UiState = {
 
 const Ctx = createContext<UiState | null>(null);
 const same = (a: Route, b: Route) =>
-  a.name === b.name && (a.name !== "playlist" || (b.name === "playlist" && a.playlist.id === b.playlist.id));
+  a.name === b.name &&
+  (a.name !== "playlist" || (b.name === "playlist" && a.playlist.id === b.playlist.id)) &&
+  (a.name !== "artist" || (b.name === "artist" && (a.artist.id ?? a.artist.name) === (b.artist.id ?? b.artist.name))) &&
+  (a.name !== "offline-pl" || (b.name === "offline-pl" && a.id === b.id)) &&
+  a.name !== "deep";
 
 export function UiProvider({ children }: { children: ReactNode }) {
   const [history, setHistory] = useState<Route[]>([{ name: "home" }]);
