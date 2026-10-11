@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { inTauri } from "../api";
 import { createPortal } from "react-dom";
 import { useSettings } from "../store/settings";
 
@@ -183,6 +185,50 @@ export function FireCursor() {
       ctx.globalAlpha = 1;
     };
 
+    // Пока тянут полосу прокрутки, движений мыши страница не получает — берём позицию у окна
+    let sbDrag = false, asking = false, sbRaf = 0;
+    const ask = () => {
+      if (asking || !inTauri) return;
+      asking = true;
+      invoke<[number, number] | null>("cursor_client").then((c) => {
+        if (c && (sbDrag || down)) move({ clientX: c[0], clientY: c[1] } as PointerEvent);
+      }).catch(() => {}).finally(() => { asking = false; });
+    };
+    const poll = () => { if (!sbDrag) return; ask(); sbRaf = requestAnimationFrame(poll); };
+    const onScrollbar = (e: PointerEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (!el || !(el instanceof HTMLElement)) return false;
+      const r = el.getBoundingClientRect();
+      return (el.scrollHeight > el.clientHeight && e.clientX > r.left + el.clientLeft + el.clientWidth)
+        || (el.scrollWidth > el.clientWidth && e.clientY > r.top + el.clientTop + el.clientHeight);
+    };
+    const sbDown = (e: PointerEvent) => {
+      if (e.button === 0 && onScrollbar(e)) { sbDrag = true; cancelAnimationFrame(sbRaf); sbRaf = requestAnimationFrame(poll); }
+    };
+    const sbStop = (e: PointerEvent) => { if (sbDrag && (e.type === "pointerup" || e.buttons === 0)) { sbDrag = false; cancelAnimationFrame(sbRaf); } };
+    const onScroll = () => { if (down || sbDrag) ask(); };
+    const mouseUp = () => { if (sbDrag) { sbDrag = false; cancelAnimationFrame(sbRaf); } };
+
+    // Переключение раскладки, ввод с IME и т. п. иногда возвращают системную стрелку,
+    // хотя мышь не двигалась. Чуть меняем значение cursor — браузер заново ставит «пустой» курсор.
+    let flip = false;
+    const reCursor = () => {
+      flip = !flip;
+      document.documentElement.style.setProperty("--fire-cur", flip ? "url(data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7) 0 0, none" : "none");
+    };
+    const onKey = () => reCursor();
+
+    window.addEventListener("pointerdown", sbDown, { passive: true, capture: true });
+    window.addEventListener("pointermove", sbStop, { passive: true, capture: true });
+    window.addEventListener("pointerup", sbStop, { passive: true, capture: true });
+    window.addEventListener("mouseup", mouseUp, { passive: true, capture: true });
+    document.addEventListener("scroll", onScroll, { passive: true, capture: true });
+    window.addEventListener("keydown", onKey, { passive: true, capture: true });
+    window.addEventListener("keyup", onKey, { passive: true, capture: true });
+    window.addEventListener("focus", onKey);
+    document.addEventListener("compositionend", onKey, true);
+    document.addEventListener("visibilitychange", onKey);
+
     window.addEventListener("pointermove", move, { passive: true });
     window.addEventListener("pointerover", move, { passive: true });
     window.addEventListener("pointerdown", press, { passive: true });
@@ -197,6 +243,18 @@ export function FireCursor() {
       document.documentElement.classList.remove("fire-cursor");
       watch?.disconnect();
       cancelAnimationFrame(raf);
+      cancelAnimationFrame(sbRaf);
+      window.removeEventListener("pointerdown", sbDown, true);
+      window.removeEventListener("pointermove", sbStop, true);
+      window.removeEventListener("pointerup", sbStop, true);
+      window.removeEventListener("mouseup", mouseUp, true);
+      document.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("keyup", onKey, true);
+      window.removeEventListener("focus", onKey);
+      document.removeEventListener("compositionend", onKey, true);
+      document.removeEventListener("visibilitychange", onKey);
+      document.documentElement.style.removeProperty("--fire-cur");
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerover", move);
       window.removeEventListener("pointerdown", press);

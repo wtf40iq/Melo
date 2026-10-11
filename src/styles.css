@@ -1162,7 +1162,7 @@ html.glass .queue { background: rgba(24, 25, 32, .78) !important; backdrop-filte
 .login-kick small { display: block; margin-top: 4px; opacity: .7; font-size: 11px; word-break: break-word; }
 
 /* Курсор-огонёк */
-html.fire-cursor, html.fire-cursor * { cursor: none !important; }
+html.fire-cursor, html.fire-cursor * { cursor: var(--fire-cur, none) !important; }
 .fire-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 2147483000; }
 
 /* Всплывающий эквалайзер */

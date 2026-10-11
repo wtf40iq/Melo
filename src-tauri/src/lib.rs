@@ -625,6 +625,7 @@ async fn silent_relogin(app: &AppHandle, user_id: i64) -> Option<Session> {
         })
         .build()
         .ok()?;
+    disable_autofill(&win);
     let tx_poll = tx.clone();
     let poll_win = win.clone();
     tauri::async_runtime::spawn(async move {
@@ -1037,6 +1038,7 @@ async fn validation_window(app: &AppHandle, url: &str) -> Result<Session, String
         })
         .build()
         .map_err(|e| e.to_string())?;
+    disable_autofill(&win);
     let tx_close = tx.clone();
     win.on_window_event(move |e| {
         if let WindowEvent::Destroyed = e {
@@ -1209,6 +1211,26 @@ fn disable_autofill(w: &tauri::WebviewWindow) {
 }
 #[cfg(not(windows))]
 fn disable_autofill(_w: &tauri::WebviewWindow) {}
+
+/// Где сейчас курсор внутри окна (в CSS-пикселях). Пока тянут полосу прокрутки, страница
+/// не получает движений мыши — огонёк спрашивает позицию отсюда.
+#[tauri::command]
+fn cursor_client(window: tauri::WebviewWindow) -> Option<(f64, f64)> {
+    let c = window.cursor_position().ok()?;
+    let p = window.inner_position().ok()?;
+    let k = window.scale_factor().unwrap_or(1.0);
+    Some(((c.x - p.x as f64) / k, (c.y - p.y as f64) / k))
+}
+
+/// Отключённое автозаполнение не прячет то, что WebView успел запомнить раньше:
+/// сохранённые пароли и введённые номера всё равно подсказываются. Стираем эти базы
+/// до запуска WebView (куки и вход ВК лежат в других файлах и не трогаются).
+fn forget_autofill(wv: &std::path::Path) {
+    let profile = wv.join("EBWebView").join("Default");
+    for f in ["Login Data", "Login Data-journal", "Login Data For Account", "Login Data For Account-journal", "Web Data", "Web Data-journal"] {
+        let _ = fs::remove_file(profile.join(f));
+    }
+}
 
 // ---------- Экономия памяти, когда окно скрыто ----------
 // Свёрнутое/убранное в трей окно: WebView2 перестаёт рисовать (анимации и canvas
@@ -1683,6 +1705,7 @@ pub fn run() {
     let wv = webview_dir();
     let _ = fs::create_dir_all(&wv);
     std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &wv);
+    forget_autofill(&wv);
 
     tauri::Builder::default()
         // Повторный запуск (ярлык, меню «Пуск») не открывает вторую копию, а показывает уже открытое окно
@@ -1740,7 +1763,7 @@ pub fn run() {
                 responder.respond(proxy(app, request).await);
             });
         })
-        .invoke_handler(tauri::generate_handler![offline::offline_root_path, offline::offline_list, offline::offline_playlist, offline::offline_tracks, offline::offline_create, offline::offline_update, offline::offline_delete_playlist, offline::offline_delete_track, offline::offline_add_files, offline::offline_add_paths, offline::offline_pick_cover, offline::offline_open, vk_direct_login, vk_login, vk_browser_login, vk_browser_submit, vk_browser_reopen, vk_browser_cancel, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install])
+        .invoke_handler(tauri::generate_handler![offline::offline_root_path, offline::offline_list, offline::offline_playlist, offline::offline_tracks, offline::offline_create, offline::offline_update, offline::offline_delete_playlist, offline::offline_delete_track, offline::offline_add_files, offline::offline_add_paths, offline::offline_pick_cover, offline::offline_open, vk_direct_login, vk_login, vk_browser_login, vk_browser_submit, vk_browser_reopen, vk_browser_cancel, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install, cursor_client])
         .run(tauri::generate_context!())
         .expect("ошибка при запуске приложения");
 }
