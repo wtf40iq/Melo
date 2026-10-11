@@ -319,20 +319,46 @@ export const vkApi: MusicApi = {
     return items(r).map(mapTrack);
   },
 
-  /** Поиск ровно как в приложении ВК: та же выдача и тот же порядок. */
+  /** Поиск: выдача ВК в её порядке, но сначала треки, где есть все слова запроса. */
   searchTracks(q) {
-    return cached(`t:${q.trim().toLowerCase()}`, async () => {
-      const c = await catalogSearch(q).catch(() => null);
-      if (c?.tracks.length) return c.tracks;
-      // Запасной путь — обычный audio.search (тот же порядок, что отдаёт ВК)
-      let list: Track[] = [];
-      for (let off = 0; off < 600; off += 300) {
-        const r = await call("audio.search", { q: q.trim(), count: 300, offset: off, auto_complete: 1, sort: 0 });
-        const page = items(r).map(mapTrack);
-        list = list.concat(page);
-        if (page.length < 300) break;
+    return cached(`t:${norm(q)}`, async () => {
+      const query = q.trim();
+      // ВК путается в тире и знаках вроде «%» — ищем и так, и без них
+      const clean = query.replace(/\s+[-–—]+\s+/g, " ").replace(/[%#@]/g, " ").replace(/\s+/g, " ").trim();
+      const plain = (x: string) => call("audio.search", { q: x, count: 300, auto_complete: 1 }).then((r) => items(r).map(mapTrack));
+      const res = await Promise.allSettled([
+        plain(query),
+        clean && clean !== query ? plain(clean) : Promise.resolve([] as Track[]),
+        catalogSearch(query).then((c) => c.tracks),
+      ]);
+      if (res.every((r) => r.status === "rejected")) throw (res[0] as PromiseRejectedResult).reason;
+      const got = (i: number) => (res[i].status === "fulfilled" ? (res[i] as PromiseFulfilledResult<Track[]>).value : []);
+      let all = uniqueTracks([...got(0), ...got(1), ...got(2)]);
+
+      const full = (t: Track) => coverage(query, `${t.artist} ${t.title}`) >= 1;
+      // Исполнитель из запроса — тот, чьё имя целиком есть в запросе и чьих треков больше всего
+      const qw = words(query);
+      const counts = new Map<string, { a: Artist; n: number }>();
+      for (const t of all) for (const name of trackArtists(t)) {
+        const k = norm(name);
+        if (!k || coverage(name, query) < 1 || words(name).length >= qw.length) continue;
+        const a = t.artists?.find((x: Artist) => norm(x.name) === k) ?? { name };
+        const c = counts.get(k);
+        counts.set(k, { a: c?.a.id ? c.a : a, n: (c?.n ?? 0) + 1 });
       }
-      return uniqueTracks(list);
+      const who = [...counts.values()].sort((x, y) => y.n - x.n || words(y.a.name).length - words(x.a.name).length)[0]?.a;
+      // Поиск ВК не нашёл саму песню — ищем среди треков этого исполнителя
+      if (who && !all.some(full)) {
+        const own = await vkApi.artistTracks(who).catch(() => [] as Track[]);
+        all = uniqueTracks([...all, ...own]);
+      }
+      const aw = new Set(who ? words(who.name) : []);
+      const rest = norm(qw.filter((w) => !aw.has(w)).join(" "));
+      const byArtist = (t: Track) => !!who && trackArtists(t).some((n) => norm(n) === norm(who.name));
+      const score = (t: Track) => (byArtist(t) ? 2 : 0) + (rest && norm(t.title) === rest ? 1 : 0);
+      const exact = all.filter(full).map((t, i) => ({ t, i, s: score(t) })).sort((x, y) => y.s - x.s || x.i - y.i).map((x) => x.t);
+      const ids = new Set(exact.map((t) => t.id));
+      return [...exact, ...all.filter((t) => !ids.has(t.id))];
     });
   },
 
@@ -348,6 +374,15 @@ export const vkApi: MusicApi = {
         ]);
         if (!playlists.length && pl.status === "fulfilled") playlists = items(pl.value).map((p: any) => mapPlaylist(p, me?.id));
         if (!artists.length && ar.status === "fulfilled") artists = items(ar.value).map(mapArtist);
+      }
+      if (!artists.length) {
+        // ВК не дал исполнителей — берём из найденных треков тех, чьё имя есть в запросе
+        const tracks = await vkApi.searchTracks(q).catch(() => [] as Track[]);
+        const seen = new Map<string, Artist>();
+        for (const t of tracks) for (const a of t.artists ?? []) {
+          if (coverage(a.name, q) >= 1 || coverage(q, a.name) >= 1) if (!seen.has(norm(a.name))) seen.set(norm(a.name), a);
+        }
+        artists = [...seen.values()].slice(0, 6);
       }
       // У поиска исполнителей часто нет фото — берём из карточки исполнителя, а если и там нет, из обложки альбома
       artists = await Promise.all(artists.filter((a) => a.name).slice(0, 8).map(async (a) => {
