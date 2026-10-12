@@ -1329,3 +1329,6 @@ html.anim-off .eq-pop, html.anim-off .eq-pop.leaving { animation: none; }
 .upd-pill { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; margin-right: 8px; border-radius: 13px; border: 0; cursor: pointer;
   background: var(--accent); color: #fff; font: 600 12px/1 inherit; font-family: inherit; animation: fade-in .3s ease; }
 .upd-pill:hover { filter: brightness(1.1); }
+
+.login-site { margin-bottom: 4px; }
+.login-site-note { display: block; margin: 0 0 12px; font-size: 12px; line-height: 1.4; }

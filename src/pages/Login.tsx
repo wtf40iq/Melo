@@ -256,6 +256,11 @@ export function Login() {
           </ol>
 
           <div className="login-or"><span>{t("или")}</span></div>
+          <button className="btn primary wide login-site" disabled={!agreed || busy || lib.booting} onClick={loginWindow}>
+            {busy ? <Loader2 size={18} className="spin" /> : <AppWindow size={18} />} {t("Войти через сайт ВКонтакте")}
+          </button>
+          <small className="muted login-site-note">{t("Откроется страница ВК: войдите любым способом. Вход запомнится, и сессия не будет слетать.")}</small>
+          {winError && !showPass && <span className="login-err">{winError}</span>}
           {!showPass ? (
             <button className="btn secondary wide" disabled={!agreed || lib.booting} onClick={() => setShowPass(true)}>
               <KeyRound size={18} /> {t("Войти по номеру и паролю")}

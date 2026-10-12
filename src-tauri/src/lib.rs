@@ -232,7 +232,15 @@ fn store_accounts(app: &AppHandle, acc: &Accounts) {
 }
 
 /// Some — добавить/обновить аккаунт и сделать активным; None — удалить активный аккаунт.
+/// Отметка «в окне ВК выполнен вход»: только тогда скрытый повторный вход имеет смысл.
+fn site_login_mark() -> PathBuf {
+    data_root().join("vk-site-login")
+}
+
 fn save_session(app: &AppHandle, s: Option<&Session>) {
+    if s.map(|s| s.client == "kate").unwrap_or(false) {
+        let _ = fs::write(site_login_mark(), b"1");
+    }
     let mut acc = load_accounts(app);
     match s {
         Some(s) => {
@@ -497,6 +505,18 @@ async fn vk_call(
     // Раньше ключ с ограниченным сроком (QR) «продлевался» скрытым входом через Kate Mobile каждые
     // 5 минут. ВК считал это попытками входа и блокировал вход по паролю — больше так не делаем.
 
+    // Ключ с ограниченным сроком (QR, пароль) скоро истечёт — заранее и тихо берём новый
+    // через сохранённый вход ВК, чтобы сессия не оборвалась посреди прослушивания.
+    let expiring = state.session.lock().unwrap().as_ref().and_then(|s| s.expires_at).map(|e| e - now_secs() < 600).unwrap_or(false);
+    let (token, ua) = if expiring {
+        match relogin_once(&app, &state, &token, false).await {
+            Some(s) => (s.token.clone(), s.user_agent()),
+            None => (token, ua),
+        }
+    } else {
+        (token, ua)
+    };
+
     let mut res = vk_send(&state, &method, &form, &token, ua).await?;
     // «Слишком много запросов в секунду» (6) — просто повторяем чуть позже.
     // Flood control (9) не долбим повторами: от них ВК только дольше держит ограничение.
@@ -578,12 +598,11 @@ async fn relogin_once(app: &AppHandle, state: &AppState, old_token: &str, urgent
     if cur.token != old_token {
         return Some(cur); // ключ уже обновил параллельный запрос
     }
-    // Скрытый вход работает только для ключа из окна Kate Mobile (там сохранён вход ВК).
-    // Для QR и входа по паролю он бесполезен и лишь копит «попытки входа» у ВК.
-    if cur.client != "kate" {
+    // Скрытый вход срабатывает, если в окне ВК сохранён вход (cookies после «Войти через сайт»).
+    // Это не ввод пароля, но часто дёргать ВК всё равно нельзя — не чаще раза в 30–60 минут.
+    if cur.client != "kate" && !site_login_mark().exists() {
         return None;
     }
-    // И даже для Kate — не чаще раза в 30 минут
     let gap = if urgent { 1800 } else { 3600 };
     let last = LAST_RELOGIN.load(std::sync::atomic::Ordering::Relaxed);
     if now_secs() - last < gap {

@@ -361,6 +361,8 @@ const en: Record<string, string> = {
   "Попробовать снова": "Try again",
   "Обновить сейчас": "Update now",
   "Новая версия": "Update",
+  "Войти через сайт ВКонтакте": "Sign in on the VK website",
+  "Откроется страница ВК: войдите любым способом. Вход запомнится, и сессия не будет слетать.": "The VK page will open: sign in any way you like. The sign-in is remembered, so the session won't drop.",
   "Позже": "Later",
   "Проверять обновления": "Check for updates",
   "Melo сам узнаёт о новой версии на GitHub и предлагает обновиться": "Melo checks GitHub for new versions and offers to update",
