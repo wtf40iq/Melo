@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { inTauri } from "../api";
 import { createPortal } from "react-dom";
 import { CursorColor, useSettings } from "../store/settings";
+import { cursorClientPoint } from "../cursorCoordinates";
 import { onVisualActivity, visualsActive } from "../visualActivity";
 import { arrowBox, blastSurface, CursorSkin, SHOCKS, SkinRefs } from "./CursorSkin";
 
@@ -126,7 +127,7 @@ type Wave = { x: number; y: number; t: number; sp: Sprites; seed: number; starte
 /** Стрелка Bloom: скруглённая, как системная, но гладкая. Кончик — в (0, 0). */
 
 // Последняя позиция мыши — переживает пересоздание эффекта (смена цвета, размера и т. п.)
-const lastPos = { x: -100, y: -100, seen: false };
+const lastPos = { x: -100, y: -100, seen: false, ratio: window.devicePixelRatio || 1 };
 /**
  * Свои курсоры и эффекты мыши: огонёк со шлейфом, гладкий Bloom со свечением
  * и ударная волна при клике. Всё рисуется на одном прозрачном холсте поверх окна.
@@ -221,17 +222,37 @@ export function FireCursor() {
     const ps: P[] = [];
     const ws: Wave[] = [];
     // Настоящая позиция мыши и сглаженные: кончик стрелки (быстро) и свечение (мягко отстаёт)
-    let x = lastPos.x, y = lastPos.y, px = x, py = y, visible = lastPos.seen, down = false;
+    let viewRatio = window.devicePixelRatio || 1, pointerVersion = 0;
+    const savedRatio = lastPos.ratio / viewRatio;
+    let x = lastPos.x * savedRatio, y = lastPos.y * savedRatio, px = x, py = y, visible = lastPos.seen, down = false;
+    let requestPointerSync: (() => void) | null = null;
+    let resetMotion: (() => void) | null = null;
     let bx = x, by = y, hx = x, hy = y, press = 0, hoverK = 0, textK = 0, tilt = 0;
     let hover: Hover = "none", lastTarget: EventTarget | null = null;
     const hist: { x: number; y: number; t: number }[] = [];
     let raf = 0, last = performance.now(), t = 0, frameN = 0, rendered = 0, canvasDirty = true;
 
     const resize = () => {
-      const d = Math.min(1.5, window.devicePixelRatio || 1);
-      cv.width = Math.round(innerWidth * d);
-      cv.height = Math.round(innerHeight * d);
+      const ratio = window.devicePixelRatio || 1;
+      const changed = ratio !== viewRatio;
+      if (changed) {
+        pointerVersion++;
+        const k = viewRatio / ratio;
+        x *= k; y *= k;
+        px = bx = hx = x; py = by = hy = y;
+        viewRatio = ratio;
+        lastPos.x = x; lastPos.y = y; lastPos.ratio = ratio;
+        ps.length = ws.length = hist.length = 0;
+        resetMotion?.();
+        for (let i = 0; i < SHOCKS; i++) resetShock(i);
+        lastTarget = null;
+      }
+      const d = Math.min(1.5, ratio);
+      const w = Math.round(innerWidth * d), h = Math.round(innerHeight * d);
+      if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; canvasDirty = true; }
+      else if (changed) { ctx.resetTransform(); ctx.clearRect(0, 0, cv.width, cv.height); canvasDirty = true; }
       ctx.setTransform(d, 0, 0, d, 0, 0);
+      if (changed) requestPointerSync?.();
     };
     resize();
 
@@ -251,12 +272,12 @@ export function FireCursor() {
     };
 
     const kick = () => { if (!disposed && !raf && visualsActive()) { last = performance.now(); rendered = 0; raf = requestAnimationFrame(loop); } };
-    const move = (e: PointerEvent) => {
-      if (disposed) return;
-      x = e.clientX; y = e.clientY;
-      lastPos.x = x; lastPos.y = y; lastPos.seen = true;
+    const place = (clientX: number, clientY: number, target: EventTarget | null) => {
+      if (disposed || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+      x = clientX; y = clientY;
+      lastPos.x = x; lastPos.y = y; lastPos.seen = true; lastPos.ratio = viewRatio;
       if (!visible) { px = bx = hx = x; py = by = hy = y; visible = true; }
-      if (e.target !== lastTarget) { lastTarget = e.target; hover = hoverOf(e.target as Element); }
+      if (target !== lastTarget) { lastTarget = target; hover = hoverOf(target as Element); }
       if (style === "fire") {
         // Частицы по всей длине пути, чтобы шлейф был сплошным и при быстром движении
         const dist = Math.hypot(x - px, y - py);
@@ -266,10 +287,17 @@ export function FireCursor() {
       px = x; py = y;
       if (own) kick();
     };
-    const leave = () => { visible = false; lastPos.seen = false; hist.length = 0; kick(); };
+    const move = (e: PointerEvent) => {
+      if (disposed) return;
+      if (viewRatio !== (window.devicePixelRatio || 1)) resize();
+      pointerVersion++; // New DOM input wins over an older asynchronous native sample.
+      place(e.clientX, e.clientY, e.target);
+    };
+    const leave = () => { stopPolling(); visible = false; down = false; lastPos.seen = false; hist.length = 0; kick(); };
     const pressDown = (e: PointerEvent) => {
       if (disposed) return;
-      down = true; x = e.clientX; y = e.clientY;
+      move(e);
+      down = true;
       if (style === "fire" && !isBlast) spawn(x, y, 26, 2.6);
       if (waves && e.button === 0) {
         const slot = isBlast ? shockN++ % SHOCKS : -1;
@@ -294,7 +322,8 @@ export function FireCursor() {
       }
       kick();
     };
-    const release = () => { down = false; kick(); };
+    const release = (e: PointerEvent) => { move(e); down = false; kick(); };
+    const cancelPointer = () => { stopPolling(); down = false; kick(); };
 
     let fails = 0;
     const loop = (now: number) => {
@@ -446,6 +475,7 @@ export function FireCursor() {
     let bloomBusy = false;
     // Пружина «желе»: растяжение вдоль движения с перехлёстом после остановки
     let st = 0, stV = 0, ang = 0, svx = 0, svy = 0, lastBx = x, lastBy = y;
+    resetMotion = () => { st = stV = svx = svy = tilt = 0; lastBx = bx; lastBy = by; };
     const wob = mat === "jelly" ? { k: 240, d: 9, amt: 1 } : mat === "glass" ? { k: 300, d: 15, amt: 0.6 } : { k: 420, d: 34, amt: 0.25 };
     const coloredHalo = mat === "glow" || mat === "neon" || mat === "jelly";
     const drawBloom = (dt: number, now: number) => {
@@ -584,7 +614,7 @@ export function FireCursor() {
     const frame = (now: number): boolean => {
       // При запуске окно ещё может иметь нулевой размер — догоняем реальный
       const d = Math.min(1.5, window.devicePixelRatio || 1);
-      if (cv.width !== Math.round(innerWidth * d) || cv.height !== Math.round(innerHeight * d)) resize();
+      if (viewRatio !== (window.devicePixelRatio || 1) || cv.width !== Math.round(innerWidth * d) || cv.height !== Math.round(innerHeight * d)) resize();
       const dt = Math.min(0.05, Math.max(0.001, (now - last) / 1000));
       last = now; t += dt;
       if (mode === "rainbow" || (mode === "accent" && frameN++ % 20 === 0)) repaint(t);
@@ -604,21 +634,30 @@ export function FireCursor() {
       return (style === "fire" && visible) || (style === "bloom" && bloomBusy) || ps.length > 0 || ws.length > 0;
     };
 
-    // Пока тянут полосу прокрутки, движений мыши страница не получает — берём позицию у окна
-    let sbDrag = false, asking = false, sbRaf = 0;
-    const ask = () => {
-      if (asking || !inTauri) return;
+    // Native polling is a fallback for scrollbar dragging, never for wheel scrolling.
+    let sbDrag = false, asking = false, sbRaf = 0, lastPoll = 0;
+    const ask = (dragOnly = true) => {
+      if (asking || disposed || !inTauri || !visualsActive() || (dragOnly && !sbDrag)) return;
       asking = true;
-      invoke<[number, number] | null>("cursor_client").then((c) => {
-        if (!disposed && c) move({ clientX: c[0], clientY: c[1], target: lastTarget } as unknown as PointerEvent);
+      const version = pointerVersion, ratio = window.devicePixelRatio || 1;
+      invoke<[number, number] | null>("cursor_client").then((physical) => {
+        if (disposed || !physical || !visualsActive() || pointerVersion !== version
+          || ratio !== (window.devicePixelRatio || 1) || (dragOnly && !sbDrag)) return;
+        const point = cursorClientPoint(physical, ratio);
+        if (point) place(point[0], point[1], document.elementFromPoint(point[0], point[1]));
       }).catch(() => {}).finally(() => { asking = false; });
     };
-    let pollUntil = 0, lastPoll = 0;
+    requestPointerSync = () => { if (visible) ask(false); };
     const poll = () => {
-      if (disposed || !visualsActive() || (!sbDrag && performance.now() > pollUntil)) { sbRaf = 0; return; }
+      sbRaf = 0;
+      if (disposed || !visualsActive() || !sbDrag) return;
       const now = performance.now();
       if (now - lastPoll >= 33) { lastPoll = now; ask(); }
       sbRaf = requestAnimationFrame(poll);
+    };
+    const stopPolling = () => {
+      sbDrag = false; pointerVersion++;
+      cancelAnimationFrame(sbRaf); sbRaf = 0;
     };
     const onScrollbar = (e: PointerEvent) => {
       const el = e.target as HTMLElement | null;
@@ -630,14 +669,16 @@ export function FireCursor() {
     const sbDown = (e: PointerEvent) => {
       if (e.button === 0 && onScrollbar(e)) { sbDrag = true; if (!sbRaf) sbRaf = requestAnimationFrame(poll); }
     };
-    const sbStop = (e: PointerEvent) => { if (sbDrag && (e.type === "pointerup" || e.buttons === 0)) sbDrag = false; };
-    const onScroll = () => {
-      // После прокрутки под курсором другой элемент
-      lastTarget = null;
-      pollUntil = performance.now() + 250;
-      if (!sbRaf) sbRaf = requestAnimationFrame(poll);
+    const sbStop = (e: PointerEvent) => {
+      if (sbDrag && (e.type === "pointerup" || e.type === "pointercancel" || e.buttons === 0)) stopPolling();
     };
-    const mouseUp = () => { sbDrag = false; };
+    const onScroll = () => {
+      // Scrolling moves content, not the physical mouse. Refresh hover without changing x/y.
+      const target = visible ? document.elementFromPoint(x, y) : null;
+      if (target !== lastTarget) { lastTarget = target; hover = hoverOf(target as Element); kick(); }
+    };
+    const mouseUp = () => stopPolling();
+    const onResize = () => { if (visualsActive()) { resize(); kick(); } };
 
     // Переключение раскладки, ввод с IME и т. п. иногда возвращают системную стрелку,
     // хотя мышь не двигалась. Чуть меняем значение cursor — браузер заново ставит «пустой» курсор.
@@ -653,6 +694,7 @@ export function FireCursor() {
       window.addEventListener("pointerdown", sbDown, cap);
       window.addEventListener("pointermove", sbStop, cap);
       window.addEventListener("pointerup", sbStop, cap);
+      window.addEventListener("pointercancel", sbStop, cap);
       window.addEventListener("mouseup", mouseUp, cap);
       document.addEventListener("scroll", onScroll, cap);
       window.addEventListener("keydown", reCursor, cap);
@@ -665,9 +707,12 @@ export function FireCursor() {
     window.addEventListener("pointerover", move, opt);
     window.addEventListener("pointerdown", pressDown, opt);
     window.addEventListener("pointerup", release, opt);
+    window.addEventListener("pointercancel", cancelPointer, opt);
     document.documentElement.addEventListener("mouseleave", leave);
     window.addEventListener("blur", leave);
-    window.addEventListener("resize", resize);
+    window.addEventListener("resize", onResize);
+    window.visualViewport?.addEventListener("resize", onResize);
+    window.addEventListener("melo:zoom", onResize);
     if (visible) {
       const el = document.elementFromPoint(x, y);
       if (el) { lastTarget = el; hover = hoverOf(el); }
@@ -676,7 +721,7 @@ export function FireCursor() {
       if (active) { resize(); kick(); }
       else {
         cancelAnimationFrame(raf); cancelAnimationFrame(sbRaf); raf = sbRaf = 0;
-        sbDrag = false; pollUntil = 0;
+        stopPolling();
         ps.length = ws.length = hist.length = 0;
         clearRenderer();
         cv.width = cv.height = 1;
@@ -697,6 +742,7 @@ export function FireCursor() {
       window.removeEventListener("pointerdown", sbDown, true);
       window.removeEventListener("pointermove", sbStop, true);
       window.removeEventListener("pointerup", sbStop, true);
+      window.removeEventListener("pointercancel", sbStop, true);
       window.removeEventListener("mouseup", mouseUp, true);
       document.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("keydown", reCursor, true);
@@ -709,9 +755,12 @@ export function FireCursor() {
       window.removeEventListener("pointerover", move);
       window.removeEventListener("pointerdown", pressDown);
       window.removeEventListener("pointerup", release);
+      window.removeEventListener("pointercancel", cancelPointer);
       document.documentElement.removeEventListener("mouseleave", leave);
       window.removeEventListener("blur", leave);
-      window.removeEventListener("resize", resize);
+      window.removeEventListener("resize", onResize);
+      window.visualViewport?.removeEventListener("resize", onResize);
+      window.removeEventListener("melo:zoom", onResize);
     };
   }, [on, own, style, s.fireColor, s.cursorCustom, s.fireTrail, s.fireSize, s.clickWave, s.animations, material, blast, S, shockSize, s.waveSize, s.cursorHover]);
 

@@ -1513,14 +1513,14 @@ fn disable_autofill(w: &tauri::WebviewWindow) {
 #[cfg(not(windows))]
 fn disable_autofill(_w: &tauri::WebviewWindow) {}
 
-/// Где сейчас курсор внутри окна (в CSS-пикселях). Пока тянут полосу прокрутки, страница
-/// не получает движений мыши — огонёк спрашивает позицию отсюда.
+/// Physical window-client pixels. The frontend converts using the WebView's
+/// actual devicePixelRatio (monitor DPI × WebView zoom), not monitor DPI alone.
+/// Used only when native scrollbar dragging suppresses DOM pointer events.
 #[tauri::command]
 fn cursor_client(window: tauri::WebviewWindow) -> Option<(f64, f64)> {
     let c = window.cursor_position().ok()?;
     let p = window.inner_position().ok()?;
-    let k = window.scale_factor().unwrap_or(1.0);
-    Some(((c.x - p.x as f64) / k, (c.y - p.y as f64) / k))
+    Some((c.x - p.x as f64, c.y - p.y as f64))
 }
 
 /// Отключённое автозаполнение не прячет то, что WebView успел запомнить раньше:

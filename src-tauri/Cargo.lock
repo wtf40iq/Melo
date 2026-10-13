@@ -2232,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "melo"
-version = "0.9.8"
+version = "0.9.9"
 dependencies = [
  "arboard",
  "cookie_store 0.21.1",

@@ -128,7 +128,13 @@ export function Effects() {
   // Масштаб интерфейса — встроенным зумом окна, чтобы координаты мыши не ломались
   useEffect(() => {
     if (!inTauri) return;
-    import("@tauri-apps/api/webview").then(({ getCurrentWebview }) => getCurrentWebview().setZoom(s.scale)).catch(() => {});
+    let alive = true;
+    import("@tauri-apps/api/webview").then(async ({ getCurrentWebview }) => {
+      if (!alive) return;
+      await getCurrentWebview().setZoom(s.scale);
+      if (alive) window.dispatchEvent(new Event("melo:zoom"));
+    }).catch(() => {});
+    return () => { alive = false; };
   }, [s.scale]);
 
   // Системное стекло Windows
