@@ -9,6 +9,7 @@ use std::{
 };
 
 mod offline;
+mod vkweb;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,7 +34,7 @@ fn default_client() -> String {
     "kate".into()
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 struct Session {
     token: String,
     user_id: i64,
@@ -47,6 +48,14 @@ struct Session {
     /// Unix-время, когда ключ истечёт (None — бессрочный)
     #[serde(default)]
     expires_at: Option<i64>,
+    /// Ключ продления VK ID (если ВК его выдал при входе по QR) — им тихо берём новый ключ
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    device_id: Option<String>,
+    /// Приложение ВК, на которое выдан ключ (нужно для продления)
+    #[serde(default)]
+    auth_app: Option<String>,
 }
 
 fn now_secs() -> i64 {
@@ -62,7 +71,7 @@ impl Session {
     fn user_agent(&self) -> &'static str {
         // Запросы должны выглядеть так же, как клиент, выдавший ключ, — иначе ВК может его отозвать
         match self.client.as_str() {
-            "vk_android" => VKA_UA,
+            "vk_android" | "vk_site" => VKA_UA,
             "vk_web" => WEB_UA,
             _ => KATE_UA,
         }
@@ -238,6 +247,9 @@ fn site_login_mark() -> PathBuf {
 }
 
 fn save_session(app: &AppHandle, s: Option<&Session>) {
+    if s.is_some() {
+        SESSION_EXPIRED.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
     if s.map(|s| s.client == "kate").unwrap_or(false) {
         let _ = fs::write(site_login_mark(), b"1");
     }
@@ -292,6 +304,7 @@ fn account_switch(app: AppHandle, state: State<'_, AppState>, user_id: i64) -> R
     acc.active = Some(user_id);
     store_accounts(&app, &acc);
     *state.session.lock().unwrap() = Some(s);
+    SESSION_EXPIRED.store(false, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 
@@ -300,6 +313,7 @@ fn account_switch(app: AppHandle, state: State<'_, AppState>, user_id: i64) -> R
 fn account_remove(app: AppHandle, state: State<'_, AppState>, user_id: i64) {
     let mut acc = load_accounts(&app);
     acc.accounts.retain(|a| a.user_id != user_id);
+    let _ = fs::remove_file(vkweb::cookies_path(data_root(), user_id));
     if acc.active == Some(user_id) {
         acc.active = None;
         *state.session.lock().unwrap() = None;
@@ -366,6 +380,7 @@ fn parse_redirect(u: &Url) -> Option<Result<Session, String>> {
             name: None,
             photo: None,
             expires_at: expiry(params.get("expires_in").and_then(|e| e.parse().ok())),
+            ..Default::default()
         }));
     }
     if params.contains_key("error") {
@@ -463,8 +478,163 @@ fn vk_session(state: State<'_, AppState>) -> Option<i64> {
 
 #[tauri::command]
 fn vk_logout(app: AppHandle, state: State<'_, AppState>) {
+    SESSION_EXPIRED.store(false, std::sync::atomic::Ordering::Relaxed);
+    if let Some(uid) = state.session.lock().unwrap().as_ref().map(|s| s.user_id) {
+        let _ = fs::remove_file(vkweb::cookies_path(data_root(), uid));
+    }
     *state.session.lock().unwrap() = None;
     save_session(&app, None);
+}
+
+// ---------- Продление сессии ----------
+// Ключ после входа по QR живёт ограниченное время. Если ВК дал ключ продления (VK ID refresh_token),
+// новый ключ берётся тихо, без входа и без лимитов на попытки. Если нет — приложение просит
+// один раз навести телефон на QR-код, не выкидывая из аккаунта.
+
+static SESSION_EXPIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LAST_REFRESH_TRY: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+fn diag_path() -> PathBuf {
+    data_root().join("vk-session.json")
+}
+fn diag_read() -> Value {
+    fs::read_to_string(diag_path()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_else(|| serde_json::json!({}))
+}
+fn diag_set(key: &str, v: Value) {
+    let mut d = diag_read();
+    if !d.is_object() {
+        d = serde_json::json!({});
+    }
+    d[key] = v;
+    let _ = fs::write(diag_path(), d.to_string());
+}
+/// Запоминает, что ВК вернул при входе: только названия полей и срок, без самих ключей.
+fn diag_login(kind: &str, obj: &Value, exp: Option<i64>, has_refresh: bool) {
+    let keys: Vec<String> = obj.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+    diag_set("login", serde_json::json!({
+        "kind": kind, "at": now_secs(), "fields": keys,
+        "expires_in": exp.map(|e| e - now_secs()), "has_refresh": has_refresh,
+    }));
+}
+
+fn mark_expired(app: &AppHandle, why: &str) {
+    use tauri::Emitter;
+    SESSION_EXPIRED.store(true, std::sync::atomic::Ordering::Relaxed);
+    diag_set("expired", serde_json::json!({ "at": now_secs(), "msg": why }));
+    let _ = app.emit("vk-session-expired", why.to_string());
+}
+
+/// Новый ключ по ключу продления VK ID.
+async fn refresh_vkid(http: &reqwest::Client, cur: &Session, refresh: &str) -> Result<Session, String> {
+    let app_id = cur.auth_app.clone().unwrap_or_else(|| VKA_ID.into());
+    let device = cur.device_id.clone().unwrap_or_default();
+    let st = format!("{:x}", now_secs() ^ 0x5f3759df);
+    let v: Value = http
+        .post("https://id.vk.com/oauth2/auth")
+        .header("User-Agent", WEB_UA)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh),
+            ("client_id", app_id.as_str()),
+            ("device_id", device.as_str()),
+            ("state", st.as_str()),
+        ])
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|_| "нет связи с id.vk.com".to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    let Some(token) = v["access_token"].as_str().filter(|t| !t.is_empty()) else {
+        return Err(v["error_description"].as_str().or(v["error"].as_str()).unwrap_or("ВК не выдал ключ").to_string());
+    };
+    let uid = v["user_id"].as_i64().or_else(|| v["user_id"].as_str().and_then(|x| x.parse().ok())).unwrap_or(cur.user_id);
+    if uid != cur.user_id {
+        return Err("ключ выдан другому аккаунту".into());
+    }
+    Ok(Session {
+        token: token.to_string(),
+        expires_at: expiry(v["expires_in"].as_i64()),
+        refresh_token: v["refresh_token"].as_str().map(String::from).or_else(|| Some(refresh.to_string())),
+        device_id: v["device_id"].as_str().map(String::from).or(cur.device_id.clone()),
+        ..cur.clone()
+    })
+}
+
+/// Тихо продлевает сессию: сначала ключом продления VK ID, потом (если был вход через окно ВК)
+/// скрытым повторным входом. `urgent` — ключ уже не работает.
+async fn renew_session(app: &AppHandle, state: &AppState, old_token: &str, urgent: bool) -> Option<Session> {
+    {
+        let _g = RELOGIN.lock().await;
+        let cur = state.session.lock().unwrap().clone()?;
+        if cur.token != old_token {
+            return Some(cur); // уже продлил параллельный запрос
+        }
+        if cur.client == "vk_site" {
+            // Вход как на сайте: свежий ключ из сохранённых куки — это не вход, ВК его не ограничивает
+            let last = LAST_REFRESH_TRY.load(std::sync::atomic::Ordering::Relaxed);
+            if !urgent && now_secs() - last < 60 {
+                return None;
+            }
+            LAST_REFRESH_TRY.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+            let path = vkweb::cookies_path(data_root(), cur.user_id);
+            let Some(client) = vkweb::WebClient::load(&path) else {
+                diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": false, "error": "нет сохранённого входа" }));
+                return None;
+            };
+            return match client.web_token().await {
+                Ok((token, uid, exp)) if uid == 0 || uid == cur.user_id => {
+                    client.save(&path);
+                    let new = Session { token, expires_at: exp, ..cur.clone() };
+                    diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": true, "kind": "web_token" }));
+                    save_session(app, Some(&new));
+                    *state.session.lock().unwrap() = Some(new.clone());
+                    Some(new)
+                }
+                Ok(_) => {
+                    diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": false, "error": "куки от другого аккаунта" }));
+                    None
+                }
+                Err(e) => {
+                    diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": false, "error": e }));
+                    None
+                }
+            };
+        }
+        if let Some(rt) = cur.refresh_token.clone() {
+            // Неудачные попытки не повторяем чаще раза в минуту (в срочном случае — сразу)
+            let last = LAST_REFRESH_TRY.load(std::sync::atomic::Ordering::Relaxed);
+            if urgent || now_secs() - last > 60 {
+                LAST_REFRESH_TRY.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
+                match refresh_vkid(&state.http, &cur, &rt).await {
+                    Ok(new) if token_alive(state, &new.token, new.user_agent()).await != Some(false) => {
+                        diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": true }));
+                        save_session(app, Some(&new));
+                        *state.session.lock().unwrap() = Some(new.clone());
+                        return Some(new);
+                    }
+                    Ok(_) => diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": false, "error": "новый ключ не работает" })),
+                    Err(e) => diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": false, "error": e })),
+                }
+            }
+        }
+    }
+    relogin_once(app, state, old_token, urgent).await
+}
+
+/// Что известно о текущей сессии — для настроек и окна продления.
+#[tauri::command]
+fn vk_session_info(state: State<'_, AppState>) -> Value {
+    let s = state.session.lock().unwrap().clone();
+    serde_json::json!({
+        "user_id": s.as_ref().map(|s| s.user_id),
+        "client": s.as_ref().map(|s| s.client.clone()),
+        "expires_at": s.as_ref().and_then(|s| s.expires_at),
+        "has_refresh": s.as_ref().map(|s| s.refresh_token.is_some() || s.client == "vk_site").unwrap_or(false),
+        "expired": SESSION_EXPIRED.load(std::sync::atomic::Ordering::Relaxed),
+        "diag": diag_read(),
+    })
 }
 
 /// Универсальный вызов метода API ВК.
@@ -502,14 +672,15 @@ async fn vk_call(
         form.push(("lang".into(), "ru".into()));
     }
 
-    // Раньше ключ с ограниченным сроком (QR) «продлевался» скрытым входом через Kate Mobile каждые
-    // 5 минут. ВК считал это попытками входа и блокировал вход по паролю — больше так не делаем.
-
-    // Ключ с ограниченным сроком (QR, пароль) скоро истечёт — заранее и тихо берём новый
-    // через сохранённый вход ВК, чтобы сессия не оборвалась посреди прослушивания.
+    // Ключ уже умер — не дёргаем ВК: ждём, пока человек продлит вход (окно с QR в приложении)
+    if SESSION_EXPIRED.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err("session_expired".into());
+    }
+    // Ключ с ограниченным сроком (QR, пароль) скоро истечёт — заранее и тихо продлеваем,
+    // чтобы сессия не оборвалась посреди прослушивания
     let expiring = state.session.lock().unwrap().as_ref().and_then(|s| s.expires_at).map(|e| e - now_secs() < 600).unwrap_or(false);
     let (token, ua) = if expiring {
-        match relogin_once(&app, &state, &token, false).await {
+        match renew_session(&app, &state, &token, false).await {
             Some(s) => (s.token.clone(), s.user_agent()),
             None => (token, ua),
         }
@@ -542,18 +713,18 @@ async fn vk_call(
             if token_alive(&state, &token, ua).await != Some(false) {
                 return Err(format!("ВК временно не ответил, попробуйте ещё раз ({msg})"));
             }
-            // Ключ отозван — пробуем тихо войти заново через сохранённый вход ВК и повторить запрос
-            if let Some(new) = relogin_once(&app, &state, &token, true).await {
+            // Ключ отозван или истёк — продлеваем (ключ продления VK ID или сохранённый вход ВК) и повторяем запрос
+            if let Some(new) = renew_session(&app, &state, &token, true).await {
                 let res = vk_send(&state, &method, &form, &new.token, new.user_agent()).await?;
                 return vk_result(res);
             }
-            // Ключ действительно отозван (вышли на всех устройствах, сменили пароль и т. п.)
+            // Продлить не вышло. Из аккаунта не выкидываем: музыка доигрывает, а приложение
+            // показывает окно «Продлите вход» с QR-кодом. Новый вход заменит ключ.
             let still_same = state.session.lock().unwrap().as_ref().map(|s| s.token == token).unwrap_or(false);
             if still_same {
-                *state.session.lock().unwrap() = None;
-                save_session(&app, None);
+                mark_expired(&app, msg);
             }
-            return Err(format!("not_authorized: {msg}"));
+            return Err(format!("session_expired: {msg}"));
         }
         return Err(format!("{msg} (код {code})"));
     }
@@ -879,7 +1050,18 @@ fn take_token(app: &AppHandle, state: &AppState, res: &Value) -> bool {
     };
     let user_id = r["user_id"].as_i64().or(res["user_id"].as_i64()).unwrap_or(0);
     let exp = expiry(r["expires_in"].as_i64().or(res["expires_in"].as_i64()));
-    let session = Session { token: token.to_string(), user_id, client: "vk_android".into(), name: None, photo: None, expires_at: exp };
+    let refresh = r["refresh_token"].as_str().or(res["refresh_token"].as_str()).map(String::from);
+    diag_login("qr_direct", r, exp, refresh.is_some());
+    let session = Session {
+        token: token.to_string(),
+        user_id,
+        client: "vk_android".into(),
+        expires_at: exp,
+        refresh_token: refresh,
+        device_id: r["device_id"].as_str().map(String::from),
+        auth_app: Some(VKA_ID.into()),
+        ..Default::default()
+    };
     save_session(app, Some(&session));
     *state.session.lock().unwrap() = Some(session);
     true
@@ -920,7 +1102,20 @@ async fn exchange_super_token(app: &AppHandle, state: &AppState, r: &Value) -> R
                     user_id = u["response"][0]["id"].as_i64().unwrap_or(0);
                 }
             }
-            let session = Session { token: token.to_string(), user_id, client: client.into(), name: None, photo: None, expires_at: expiry(d["expires_in"].as_i64()) };
+            let exp = expiry(d["expires_in"].as_i64());
+            let refresh = d["refresh_token"].as_str().or(v["refresh_token"].as_str()).filter(|t| !t.is_empty()).map(String::from);
+            let device = d["device_id"].as_str().or(v["device_id"].as_str()).map(String::from).unwrap_or_else(|| uuid.clone());
+            diag_login(&format!("qr_{client}"), d, exp, refresh.is_some());
+            let session = Session {
+                token: token.to_string(),
+                user_id,
+                client: client.into(),
+                expires_at: exp,
+                refresh_token: refresh,
+                device_id: Some(device),
+                auth_app: Some(app_id.into()),
+                ..Default::default()
+            };
             save_session(app, Some(&session));
             *state.session.lock().unwrap() = Some(session);
             return Ok(());
@@ -930,9 +1125,48 @@ async fn exchange_super_token(app: &AppHandle, state: &AppState, r: &Value) -> R
     Err(format!("Не удалось завершить вход ({})", errors.join("; ")))
 }
 
+static WEB_QR: Mutex<Option<vkweb::WebQr>> = Mutex::new(None);
+
+/// Вход по QR завершён на сайте ВК: берём ключ из куки и запоминаем куки для продления.
+async fn finish_web_login(app: &AppHandle, state: &AppState, q: &vkweb::WebQr) -> Result<(), String> {
+    let (token, mut user_id, exp) = q.client.web_token().await?;
+    if user_id == 0 {
+        if let Ok(u) = vka_get(&state.http, "https://api.vk.com/method/users.get", &[("access_token", &token), ("v", API_VERSION)]).await {
+            user_id = u["response"][0]["id"].as_i64().unwrap_or(0);
+        }
+    }
+    if user_id == 0 {
+        return Err("ВК подтвердил вход, но не сообщил аккаунт".into());
+    }
+    q.client.save(&vkweb::cookies_path(data_root(), user_id));
+    diag_set("login", serde_json::json!({
+        "kind": "qr_site", "at": now_secs(), "expires_in": exp.map(|e| e - now_secs()), "has_refresh": true,
+    }));
+    let session = Session {
+        token,
+        user_id,
+        client: "vk_site".into(),
+        expires_at: exp,
+        auth_app: Some(vkweb::WEB_APP.into()),
+        ..Default::default()
+    };
+    save_session(app, Some(&session));
+    *state.session.lock().unwrap() = Some(session);
+    Ok(())
+}
+
 /// Создаёт новый QR-код для входа.
 #[tauri::command]
 async fn qr_start(state: State<'_, AppState>) -> Result<QrCode, String> {
+    // Основной способ — как на сайте ВК (сессия потом продлевается сама). Старый — запасной.
+    match vkweb::qr_start().await {
+        Ok((q, url, exp)) => {
+            let hash = format!("w:{}", q.auth_hash);
+            *WEB_QR.lock().unwrap() = Some(q);
+            return Ok(QrCode { url, hash, expires_at: exp });
+        }
+        Err(e) => diag_set("qr_site", serde_json::json!({ "at": now_secs(), "error": e })),
+    }
     let anon = anon_token(&state).await?;
     let res = vka_get(
         &state.http,
@@ -951,6 +1185,30 @@ async fn qr_start(state: State<'_, AppState>) -> Result<QrCode, String> {
 /// Проверяет, отсканирован ли код.
 #[tauri::command]
 async fn qr_check(app: AppHandle, state: State<'_, AppState>, hash: String) -> Result<QrStatus, String> {
+    if let Some(h) = hash.strip_prefix("w:") {
+        let q = WEB_QR.lock().unwrap().clone().filter(|q| q.auth_hash == h).ok_or("QR-код устарел")?;
+        return Ok(match vkweb::qr_check(&q).await {
+            Ok(vkweb::Check::Done) => match finish_web_login(&app, &state, &q).await {
+                Ok(()) => {
+                    *WEB_QR.lock().unwrap() = None;
+                    QrStatus { state: "ok".into(), raw: Value::Null }
+                }
+                Err(e) => QrStatus { state: "error".into(), raw: Value::String(e) },
+            },
+            Ok(vkweb::Check::Status(st)) => {
+                let s = match st {
+                    0 => "waiting",
+                    3 => "declined",
+                    4 => "expired",
+                    5 => "need_code",
+                    _ => "scanned",
+                };
+                QrStatus { state: s.into(), raw: Value::from(st) }
+            }
+            Err(e) if e.contains("Нет соединения") => QrStatus { state: "scanned".into(), raw: Value::Null },
+            Err(e) => QrStatus { state: "error".into(), raw: Value::String(e) },
+        });
+    }
     let anon = anon_token(&state).await?;
     let res = vka_get(
         &state.http,
@@ -985,6 +1243,19 @@ async fn qr_check(app: AppHandle, state: State<'_, AppState>, hash: String) -> R
 /// Отправляет код подтверждения, который ВК показал на телефоне.
 #[tauri::command]
 async fn qr_submit_code(app: AppHandle, state: State<'_, AppState>, hash: String, code: String) -> Result<QrStatus, String> {
+    if let Some(h) = hash.strip_prefix("w:") {
+        let q = WEB_QR.lock().unwrap().clone().filter(|q| q.auth_hash == h).ok_or("QR-код устарел")?;
+        let code: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
+        let res = vkweb::qr_validate(&q, &code).await?;
+        let raw = res["response"]["status"].clone();
+        let st = match raw.as_i64() {
+            Some(0) => "accepted",
+            Some(1) => "incorrect",
+            Some(2) => "expired",
+            _ => "error",
+        };
+        return Ok(QrStatus { state: st.into(), raw: res["response"].clone() });
+    }
     let anon = anon_token(&state).await?;
     let code: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
     let res = vka_get(
@@ -1142,6 +1413,9 @@ async fn vk_direct_login(
             name: None,
             photo: None,
             expires_at: expiry(res["expires_in"].as_i64()),
+            refresh_token: res["refresh_token"].as_str().map(String::from),
+            auth_app: Some(VKA_ID.into()),
+            ..Default::default()
         };
         let uid = session.user_id;
         save_session(&app, Some(&session));
@@ -1216,10 +1490,18 @@ async fn vk_direct_login(
 #[cfg(windows)]
 fn disable_autofill(w: &tauri::WebviewWindow) {
     let _ = w.with_webview(|wv| unsafe {
-        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4;
+        use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Settings3, ICoreWebView2Settings4};
         use windows_core::Interface;
         if let Ok(core) = wv.controller().CoreWebView2() {
             if let Ok(settings) = core.Settings() {
+                // App chrome is not a general-purpose browser UI.
+                let _ = settings.SetAreDefaultContextMenusEnabled(false);
+                if let Ok(s3) = settings.cast::<ICoreWebView2Settings3>() {
+                    let _ = s3.SetAreBrowserAcceleratorKeysEnabled(false);
+                }
+                let _ = settings.SetIsStatusBarEnabled(false);
+                #[cfg(not(debug_assertions))]
+                let _ = settings.SetAreDevToolsEnabled(false);
                 if let Ok(s4) = settings.cast::<ICoreWebView2Settings4>() {
                     let _ = s4.SetIsGeneralAutofillEnabled(false);
                     let _ = s4.SetIsPasswordAutosaveEnabled(false);
@@ -1262,6 +1544,7 @@ fn set_background(w: &tauri::WebviewWindow, bg: bool) {
     if IN_BACKGROUND.swap(bg, Ordering::Relaxed) == bg {
         return;
     }
+    let _ = w.eval(&format!("window.dispatchEvent(new CustomEvent('melo:background', {{detail: {}}}));", bg));
     let _ = w.with_webview(move |wv| unsafe {
         use webview2_com::Microsoft::Web::WebView2::Win32::{
             ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
@@ -1369,14 +1652,14 @@ fn hide_tray_menu(app: &AppHandle) {
     release_tray_menu(app);
 }
 
-/// Меню трея — отдельный WebView (~100 МБ). Если его минуту не открывали,
+/// Меню трея — отдельный WebView (~100 МБ). Если его 15 секунд не открывали,
 /// закрываем совсем; при следующем клике по значку оно создастся заново.
 fn release_tray_menu(app: &AppHandle) {
     static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let my = GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_secs(15)).await;
         if GEN.load(std::sync::atomic::Ordering::Relaxed) != my {
             return;
         }
@@ -1397,6 +1680,7 @@ static LAST_EFFECT: Mutex<String> = Mutex::new(String::new());
 fn create_tray_menu(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     use tauri::window::{Effect, EffectsBuilder};
     let w = create_tray_window(app)?;
+    disable_autofill(&w);
     let effect = match LAST_EFFECT.lock().unwrap().as_str() {
         "mica" => Some(Effect::Mica),
         "tabbed" => Some(Effect::Tabbed),
@@ -1487,8 +1771,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         b = b.icon(icon.clone());
     }
     b.build(app)?;
-    // Окно меню создаём заранее, чтобы оно открывалось мгновенно
-    let _ = create_tray_menu(app.handle());
+    // Создаём дополнительный WebView только при первом открытии меню трея.
+    // show_tray_menu recreates it on demand after idle eviction.
     Ok(())
 }
 
@@ -1764,6 +2048,25 @@ pub fn run() {
                 }
             }
             setup_tray(app)?;
+            // Фоновое продление: раз в 5 минут смотрим, не истекает ли ключ, даже если
+            // приложение просто играет музыку и к ВК не обращается
+            let bg = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                    let state = bg.state::<AppState>();
+                    let cur = state.session.lock().unwrap().clone();
+                    let Some(cur) = cur else { continue };
+                    let expired = SESSION_EXPIRED.load(std::sync::atomic::Ordering::Relaxed);
+                    // Ключ из куки можно брать снова и снова: если сеть моргнула и ключ «умер» — пробуем опять
+                    if expired && cur.client != "vk_site" {
+                        continue;
+                    }
+                    if expired || cur.expires_at.map(|e| e - now_secs() < 900).unwrap_or(false) {
+                        let _ = renew_session(&bg, &state, &cur.token, false).await;
+                    }
+                }
+            });
             if let Some(base) = start_stream_server(handle.clone()) {
                 *app.state::<AppState>().stream_base.lock().unwrap() = base;
             }
@@ -1802,7 +2105,7 @@ pub fn run() {
                 responder.respond(proxy(app, request).await);
             });
         })
-        .invoke_handler(tauri::generate_handler![offline::offline_root_path, offline::offline_list, offline::offline_playlist, offline::offline_tracks, offline::offline_create, offline::offline_update, offline::offline_delete_playlist, offline::offline_delete_track, offline::offline_add_files, offline::offline_add_paths, offline::offline_pick_cover, offline::offline_open, vk_direct_login, vk_login, vk_browser_login, vk_browser_submit, vk_browser_reopen, vk_browser_cancel, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install, cursor_client])
+        .invoke_handler(tauri::generate_handler![offline::offline_root_path, offline::offline_list, offline::offline_playlist, offline::offline_tracks, offline::offline_create, offline::offline_update, offline::offline_delete_playlist, offline::offline_delete_track, offline::offline_add_files, offline::offline_add_paths, offline::offline_pick_cover, offline::offline_open, vk_direct_login, vk_login, vk_browser_login, vk_browser_submit, vk_browser_reopen, vk_browser_cancel, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install, cursor_client, vk_session_info])
         .run(tauri::generate_context!())
         .expect("ошибка при запуске приложения");
 }

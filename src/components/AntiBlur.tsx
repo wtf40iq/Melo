@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Loader2, RotateCcw, WandSparkles } from "lucide-react";
+import { uncensoredMark, censoredMark } from "../api/match";
 import { api } from "../api";
 import { antiBlur } from "../store/antiblur";
 import { usePlayer } from "../store/player";
@@ -108,7 +109,7 @@ export function AntiBlur() {
                   <Cover seed={v.title} src={v.cover} size={36} radius={6} />
                   <span className="ab-text">
                     <b>{v.title}{v.explicit && <em className="explicit">E</em>}</b>
-                    <small>{v.artist}{i === 0 ? ` · ${t("оригинал")}` : ""}</small>
+                    <small>{v.artist}{i === 0 ? ` · ${t("оригинал")}` : ""}{uncensoredMark(v) ? ` · ${t("Без цензуры")}` : censoredMark(v) ? ` · ${t("С цензурой")}` : ""}</small>
                   </span>
                   <span className="ab-time">{formatTime(v.duration)}</span>
                   <span className="ab-check">{v.id === cur.id && <Check size={16} />}</span>

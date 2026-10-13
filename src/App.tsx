@@ -10,6 +10,7 @@ import { LyricsPanel } from "./components/LyricsPanel";
 import { Toasts } from "./components/Toasts";
 import { Tooltip } from "./components/Tooltip";
 import { Effects } from "./components/Effects";
+import { RenewSession } from "./components/RenewSession";
 import { OfflineDrop } from "./components/OfflineDrop";
 import { Home } from "./pages/Home";
 import { Playlists } from "./pages/Playlists";
@@ -22,6 +23,8 @@ import { DeepSearch } from "./pages/DeepSearch";
 import { Offline } from "./pages/Offline";
 import { OfflinePlaylist } from "./pages/OfflinePlaylist";
 import { Login } from "./pages/Login";
+import { MixPage } from "./pages/MixPage";
+import { keepWave } from "./store/wave";
 import { Settings } from "./pages/Settings";
 import { SettingsProvider, useSettings } from "./store/settings";
 import { LibraryProvider, useLibrary } from "./store/library";
@@ -47,10 +50,15 @@ function Shell() {
     mainRef.current?.scrollTo({ top: 0 });
   }, [r, ui.query]);
 
-  // Горячие клавиши
+  useEffect(() => { keepWave(player, lib.tracks); }, [player.current?.id, player.queue.length, player.index]);
+
+  // Keep one keyboard listener; fresh refs avoid re-registering on playback changes.
+  const shortcuts = useRef({ player, ui });
+  shortcuts.current = { player, ui };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const typing = e.target instanceof HTMLInputElement;
+      const { player, ui } = shortcuts.current;
+      const typing = e.target instanceof Element && !!e.target.closest("input, textarea, [contenteditable='true']");
       if ((e.ctrlKey && e.code === "KeyF") || (!typing && e.key === "/")) {
         e.preventDefault();
         document.getElementById("global-search")?.focus();
@@ -67,7 +75,7 @@ function Shell() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [player, ui]);
+  }, []);
 
   // После выхода останавливаем музыку
   useEffect(() => {
@@ -81,16 +89,16 @@ function Shell() {
   trayActions.current = player;
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
-    let off: (() => void) | undefined;
+    let off: (() => void) | undefined, disposed = false;
     import("@tauri-apps/api/event").then(({ listen }) =>
       listen<string>("tray", (e) => {
         const p = trayActions.current;
         if (e.payload === "toggle") p.toggle();
         else if (e.payload === "next") p.next();
         else if (e.payload === "prev") p.prev();
-      }).then((u) => (off = u)),
-    );
-    return () => off?.();
+      }).then((u) => { if (disposed) u(); else off = u; }),
+    ).catch(() => {});
+    return () => { disposed = true; off?.(); };
   }, []);
   useEffect(() => {
     if (!("__TAURI_INTERNALS__" in window)) return;
@@ -137,6 +145,7 @@ function Shell() {
     if (r.name === "offline") return <Offline />;
     if (r.name === "offline-pl") return <OfflinePlaylist key={r.id} id={r.id} />;
     if (r.name === "deep") return <DeepSearch artist={r.artist} title={r.title} />;
+    if (r.name === "mix") return <MixPage key={r.id} id={r.id} />;
     return <PlaylistPage key={r.playlist.id} playlist={r.playlist} />;
   };
 
@@ -177,6 +186,7 @@ export default function App() {
             <UpdateProvider>
               <Shell />
               <UpdateDialog />
+              <RenewSession />
             </UpdateProvider>
           </PlayerProvider>
         </LibraryProvider>

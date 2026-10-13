@@ -151,7 +151,7 @@ export function Login() {
             if (!alive) return;
             if (st.state === "ok") return finish();
             if (st.state === "error") {
-              setError(String(st.raw ?? ""));
+              setError(t(String(st.raw ?? "")));
               setPhase("error");
               return;
             }

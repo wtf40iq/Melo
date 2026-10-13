@@ -1,9 +1,9 @@
 import { Undo2 } from "lucide-react";
 import { useT } from "../store/settings";
-import { useUi } from "../store/ui";
+import { useToasts } from "../store/ui";
 
 export function Toasts() {
-  const { toasts, dismissToast } = useUi();
+  const { toasts, dismissToast } = useToasts();
   const t = useT();
   return (
     <div className="toasts" aria-live="polite">

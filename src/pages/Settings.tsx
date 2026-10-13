@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Check, Copy, FileText, RefreshCw, Sparkles, LogOut, RotateCcw, UserPlus, X } from "lucide-react";
+import { memo, useEffect, useState } from "react";
+import { AppWindow, Info, Music2, Palette, UserRound, WandSparkles, type LucideIcon, Check, Copy, FileText, RefreshCw, Sparkles, LogOut, RotateCcw, UserPlus, X } from "lucide-react";
 import { api } from "../api";
 import { AppInfo } from "../api/types";
 import { useUi } from "../store/ui";
@@ -10,6 +10,8 @@ import { ACCENTS, useSettings } from "../store/settings";
 import { useUpdate } from "../store/update";
 import { LegalDialog } from "../components/LegalDialog";
 import { Dialog } from "../components/Dialog";
+import { ARROW, MATERIALS } from "../components/CursorSkin";
+import { CURSOR_SWATCHES } from "../components/FireCursor";
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
@@ -32,10 +34,10 @@ function Seg<T extends string>({ value, onChange, options }: { value: T; onChang
   );
 }
 
-function Range({ value, min, max, step, onChange }: { value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
+function Range({ value, min, max, step, onChange, label }: { label?: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
   return (
     <input
-      type="range" className="slider set-slider" min={min} max={max} step={step} value={value}
+      type="range" aria-label={label} className="slider set-slider" min={min} max={max} step={step} value={value}
       onChange={(e) => onChange(Number(e.target.value))}
       style={{ ["--pct" as string]: `${((value - min) / (max - min)) * 100}%` }}
     />
@@ -55,13 +57,52 @@ function Row({ title, hint, children }: { title: string; hint?: string; children
   );
 }
 
-export function Settings() {
+type TabId = "play" | "look" | "custom" | "app" | "account" | "about";
+const TABS: [TabId, string, string, LucideIcon][] = [
+  ["play", "Воспроизведение", "Звук, эквалайзер", Music2],
+  ["look", "Внешний вид", "Цвет, язык, размеры", Palette],
+  ["custom", "Кастомизация", "Курсор, эффекты, фон", WandSparkles],
+  ["app", "Приложение", "Окно, обновления, клавиши", AppWindow],
+  ["account", "Аккаунт", "Вход ВКонтакте", UserRound],
+  ["about", "О приложении", "Версия и данные", Info],
+];
+
+/** Плитка выбора с картинкой-превью. */
+function Tile({ on, title, hint, onClick, children }: { on: boolean; title: string; hint?: string; onClick: () => void; children?: React.ReactNode }) {
+  const t = useSettings().t;
+  return (
+    <button className={`set-tile ${on ? "on" : ""}`} onClick={onClick} aria-pressed={on}>
+      {children && <span className="set-tile-art">{children}</span>}
+      <b>{t(title)}</b>
+      {hint && <small>{t(hint)}</small>}
+      {on && <span className="set-tile-check"><Check size={13} /></span>}
+    </button>
+  );
+}
+
+const MiniArrow = ({ cls }: { cls: string }) => (
+  <svg className={`mini-arrow ${cls}`} viewBox="-2 -2 20 26" width="30" height="40">
+    {cls === "chrome" && (
+      <defs>
+        <linearGradient id="mini-chrome" x1="0" y1="0" x2="1" y2=".4">
+          <stop offset="0" stopColor="#fdfeff" /><stop offset=".3" stopColor="#8b93a3" /><stop offset=".45" stopColor="#262a33" />
+          <stop offset=".58" stopColor="#f4f7fc" /><stop offset=".8" stopColor="#3b414e" /><stop offset="1" stopColor="#e9edf4" />
+        </linearGradient>
+      </defs>
+    )}
+    <path d={ARROW} />
+  </svg>
+);
+
+export const Settings = memo(function Settings() {
   const s = useSettings();
   const lib = useLibrary();
   const ui = useUi();
   const upd = useUpdate();
   const [doc, setDoc] = useState<"terms" | "privacy" | null>(null);
   const [confirmOut, setConfirmOut] = useState(false);
+  const [tab, setTabState] = useState<TabId>(() => (sessionStorage.getItem("melo.setTab") as TabId) || "play");
+  const setTab = (v: TabId) => { setTabState(v); sessionStorage.setItem("melo.setTab", v); document.querySelector(".set-scroll")?.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior }); };
   const t = s.t;
   const [info, setInfo] = useState<AppInfo | null>(null);
   useEffect(() => {
@@ -73,13 +114,35 @@ export function Settings() {
     navigator.clipboard?.writeText(text).catch(() => {});
     ui.toast("Скопировано");
   };
+  const cur = TABS.find((x) => x[0] === tab) ?? TABS[0];
+  const SectionIcon = cur[3];
+  const showTrail = s.cursorStyle === "fire" || (s.cursorStyle === "bloom" && (s.cursorMaterial === "glow" || s.cursorMaterial === "neon"));
 
   return (
     <div className="page settings">
       <h1 className="page-title">{t("Настройки")}</h1>
+      <div className="set-layout">
+        <nav className="set-nav" aria-label={t("Разделы настроек")}>
+          {TABS.map(([id, label, hint, Icon]) => (
+            <button key={id} className={`set-nav-btn ${tab === id ? "on" : ""}`} onClick={() => setTab(id)}>
+              <span className="set-nav-ico"><Icon size={17} /></span>
+              <span className="set-nav-text">{t(label)}<small>{t(hint)}</small></span>
+            </button>
+          ))}
+        </nav>
 
-      <section className="set-card">
-        <h3>{t("Воспроизведение")}</h3>
+        <div className="set-main">
+          <header className="set-head">
+            <span className="set-head-icon" aria-hidden><SectionIcon size={21} strokeWidth={1.7} /></span>
+            <div className="set-head-text">
+              <h2>{t(cur[1])}</h2>
+              <small>{t(cur[2])}</small>
+            </div>
+          </header>
+          <div className="set-scroll">
+          {tab === "play" && <>
+            <section className="set-card">
+              <h3>{t("Воспроизведение")}</h3>
         <Row title="Выравнивать громкость" hint="Тихие и громкие треки звучат одинаково">
           <Toggle checked={s.normalize} onChange={(v) => s.set({ normalize: v })} label={t("Выравнивать громкость")} />
         </Row>
@@ -107,19 +170,20 @@ export function Settings() {
             ))}
           </div>
         </Row>
-      </section>
-
-      <section className="set-card">
-        <h3>{t("Эквалайзер")}</h3>
+            </section>
+            <section className="set-card">
+              <h3>{t("Эквалайзер")}</h3>
         <div className="set-row">
           <span>{t("Включить эквалайзер")}</span>
           <Toggle checked={s.eqEnabled} onChange={(v) => s.set({ eqEnabled: v })} label={t("Включить эквалайзер")} />
         </div>
         <EqEditor />
-      </section>
+            </section>
+          </>}
 
-      <section className="set-card">
-        <h3>{t("Внешний вид")}</h3>
+          {tab === "look" && <>
+            <section className="set-card">
+              <h3>{t("Цвет")}</h3>
         <div className="set-row">
           <span>{t("Цвет акцента")}</span>
           <div className="swatches">
@@ -133,6 +197,12 @@ export function Settings() {
             </label>
           </div>
         </div>
+              <Row title="Цвет из обложки" hint="Акцентный цвет подстраивается под обложку играющего трека">
+                <Toggle checked={s.dynamicAccent} onChange={(v) => s.set({ dynamicAccent: v })} label={t("Цвет из обложки")} />
+              </Row>
+            </section>
+            <section className="set-card">
+              <h3>{t("Интерфейс")}</h3>
         <div className="set-row">
           <span>{t("Язык")}</span>
           <div className="segmented">
@@ -143,6 +213,12 @@ export function Settings() {
             ))}
           </div>
         </div>
+        <Row title="Скругление углов">
+          <Seg value={s.radius} onChange={(v) => s.set({ radius: v })} options={[["sharp", "Острые"], ["normal", "Обычные"], ["round", "Круглые"]]} />
+        </Row>
+        <Row title="Масштаб интерфейса">
+          <Seg value={String(s.scale)} onChange={(v) => s.set({ scale: Number(v) })} options={[["0.9", "90%"], ["1", "100%"], ["1.1", "110%"], ["1.25", "125%"]]} />
+        </Row>
         <Row title="Анимации">
           <div className="segmented">
             {([["full", "Все"], ["reduced", "Меньше"], ["off", "Выкл."]] as const).map(([v, label]) => (
@@ -161,25 +237,76 @@ export function Settings() {
         <Row title="Обложка в боковой панели" hint="Большая обложка текущего трека слева">
           <Toggle checked={s.sideCover} onChange={(v) => s.set({ sideCover: v })} label={t("Обложка в боковой панели")} />
         </Row>
-      </section>
+            </section>
+          </>}
 
-      <section className="set-card">
-        <h3>{t("Эффекты и кастомизация")}</h3>
-        <Row title="Прозрачное окно (стекло)" hint={s.glass === "acrylic" ? "Акрил — матовое стекло. На некоторых ПК окно может тормозить при перетаскивании" : "Слюда — оттенок обоев (Windows 11), Акрил — матовое стекло"}>
-          <Seg value={s.glass} onChange={(v) => s.set({ glass: v })} options={[["off", "Выкл."], ["mica", "Слюда"], ["tabbed", "Слюда+"], ["acrylic", "Акрил"]]} />
-        </Row>
-        {s.glass !== "off" && (
-          <Row title="Плотность стекла">
-            <input
-              type="range" className="slider set-slider" min={0.15} max={0.9} step={0.05} value={s.glassOpacity}
-              onChange={(e) => s.set({ glassOpacity: Number(e.target.value) })}
-              style={{ ["--pct" as string]: `${((s.glassOpacity - 0.15) / 0.75) * 100}%` }}
-            />
-          </Row>
-        )}
-        <Row title="Живой фон" hint="Эффект за панелями приложения">
-          <Seg value={s.bgEffect} onChange={(v) => s.set({ bgEffect: v })} options={[["none", "Нет"], ["aurora", "Аврора"], ["cover", "Обложка"], ["stars", "Звёзды"], ["grain", "Плёнка"]]} />
-        </Row>
+          {tab === "custom" && <>
+            <section className="set-card">
+              <h3>{t("Курсор")}</h3>
+              <div className="set-tiles three">
+                <Tile on={s.cursorStyle === "system"} title="Системный" hint="Стрелка Windows" onClick={() => s.set({ cursorStyle: "system" })}><MiniArrow cls="sys" /></Tile>
+                <Tile on={s.cursorStyle === "fire"} title="Огонёк" hint="Горит и оставляет шлейф" onClick={() => s.set({ cursorStyle: "fire" })}><span className="mini-fire" /></Tile>
+                <Tile on={s.cursorStyle === "bloom"} title="Bloom" hint="Стрелка из материала" onClick={() => s.set({ cursorStyle: "bloom" })}><MiniArrow cls="glass" /></Tile>
+              </div>
+              {s.cursorStyle === "bloom" && <>
+                <span className="set-label">{t("Материал")}</span>
+                <div className="set-tiles">
+                  {MATERIALS.map((m) => (
+                    <Tile key={m.id} on={s.cursorMaterial === m.id} title={m.label} hint={m.hint} onClick={() => s.set({ cursorMaterial: m.id })}><MiniArrow cls={m.id} /></Tile>
+                  ))}
+                </div>
+                <small className="faint">{t("Подвигайте мышью — курсор уже поменялся. Стекло и искажение лучше всего видно над обложками и текстом.")}</small>
+              </>}
+              {s.cursorStyle === "bloom" && <Row title="Кружок при наведении" hint="Подсветка курсора над кнопками">
+                <Toggle checked={s.cursorHover} onChange={(v) => s.set({ cursorHover: v })} label={t("Кружок при наведении")} />
+              </Row>}
+              {(s.cursorStyle !== "system" || s.clickWave) && (
+                <div className="set-sub">
+            <div className="set-row">
+                  <span>{t("Цвет курсора")}</span>
+                  <div className="swatches cursor-swatches">
+                    {CURSOR_SWATCHES.map(([id, label, bg]) => (
+                      <button key={id} className={`swatch ${s.fireColor === id ? "on" : ""}`} style={{ background: bg }} onClick={() => s.set({ fireColor: id })} aria-label={t(label)} data-tip={t(label)}>
+                        {s.fireColor === id && <Check size={15} />}
+                      </button>
+                    ))}
+                    <button className={`swatch accent-swatch ${s.fireColor === "accent" ? "on" : ""}`} onClick={() => s.set({ fireColor: "accent" })} aria-label={t("Цвет акцента")} data-tip={t(s.dynamicAccent ? "Как акцент — из обложки" : "Как акцент")}>
+                      {s.fireColor === "accent" ? <Check size={15} /> : <span className="accent-dot" />}
+                    </button>
+                    <label className={`swatch custom ${s.fireColor === "custom" ? "on" : ""}`} data-tip={t("Свой цвет")} style={{ background: s.fireColor === "custom" ? s.cursorCustom : undefined }}>
+                      <input type="color" value={s.cursorCustom} onChange={(e) => s.set({ cursorCustom: e.target.value, fireColor: "custom" })} onClick={() => s.fireColor !== "custom" && s.set({ fireColor: "custom" })} aria-label={t("Свой цвет")} />
+                      {s.fireColor === "custom" && <Check size={15} />}
+                    </label>
+                  </div>
+                </div>
+                  {s.cursorStyle !== "system" && (
+                    <>
+                      {showTrail && <Row title="Длина шлейфа"><Range value={s.fireTrail} min={s.cursorStyle === "bloom" ? 0 : 0.4} max={2} step={0.05} onChange={(v) => s.set({ fireTrail: v })} /></Row>}
+                      <Row title="Размер"><Range value={s.fireSize} min={0.6} max={1.8} step={0.05} onChange={(v) => s.set({ fireSize: v })} /></Row>
+                    </>
+                  )}
+                </div>
+              )}
+            </section>
+
+            <section className="set-card">
+              <h3>{t("Клик")}</h3>
+              <Row title="Волна при клике" hint="От курсора расходится ударная волна">
+                <Toggle checked={s.clickWave} onChange={(v) => s.set({ clickWave: v })} label={t("Волна при клике")} />
+              </Row>
+              {s.clickWave && <Row title="Размер волны" hint={`${t("Насколько далеко расходится круг")} · ${Math.round(s.waveSize * 100)}%`}>
+                <Range label={t("Размер волны")} value={s.waveSize} min={0.2} max={3} step={0.05} onChange={(v) => s.set({ waveSize: v })} />
+              </Row>}
+              {s.clickWave && (
+                <div className="set-tiles two">
+                  <Tile on={s.waveStyle === "ring"} title="Кольцо" hint="Светящиеся кольца и искры цвета курсора" onClick={() => s.set({ waveStyle: "ring" })}><span className="mini-ring" /></Tile>
+                  <Tile on={s.waveStyle === "blast"} title="Взрыв" hint="Чистая ударная волна с преломлением — без искр и лучей" onClick={() => s.set({ waveStyle: "blast" })}><span className="mini-blast" /></Tile>
+                </div>
+              )}
+            </section>
+
+            <section className="set-card">
+              <h3>{t("Свет и фон")}</h3>
         <Row title="Свечение за курсором" hint="Мягкий свет акцентного цвета следует за мышью">
           <Toggle checked={s.cursorGlow} onChange={(v) => s.set({ cursorGlow: v })} label={t("Свечение за курсором")} />
         </Row>
@@ -190,23 +317,27 @@ export function Settings() {
             <Row title="Яркость"><Range value={s.glowPower} min={0.05} max={0.8} step={0.01} onChange={(v) => s.set({ glowPower: v })} /></Row>
           </div>
         )}
-        <Row title="Курсор-огонёк" hint="Вместо стрелки мыши — горящий огонёк, который оставляет за собой шлейф">
-          <Toggle checked={s.fireCursor} onChange={(v) => s.set({ fireCursor: v })} label={t("Курсор-огонёк")} />
+        <Row title="Прозрачное окно (стекло)" hint={s.glass === "acrylic" ? "Акрил — матовое стекло. На некоторых ПК окно может тормозить при перетаскивании" : "Слюда — оттенок обоев (Windows 11), Акрил — матовое стекло"}>
+          <Seg value={s.glass} onChange={(v) => s.set({ glass: v })} options={[["off", "Выкл."], ["mica", "Слюда"], ["tabbed", "Слюда+"], ["acrylic", "Акрил"]]} />
         </Row>
-        {s.fireCursor && (
-          <div className="set-sub">
-            <Row title="Цвет пламени">
-              <Seg value={s.fireColor} onChange={(v) => s.set({ fireColor: v })} options={[["fire", "Огонь"], ["blue", "Синий"], ["violet", "Фиолетовый"], ["green", "Зелёный"], ["accent", "Акцент"]]} />
-            </Row>
-            <Row title="Длина шлейфа"><Range value={s.fireTrail} min={0.4} max={2} step={0.05} onChange={(v) => s.set({ fireTrail: v })} /></Row>
-            <Row title="Размер"><Range value={s.fireSize} min={0.6} max={1.8} step={0.05} onChange={(v) => s.set({ fireSize: v })} /></Row>
-          </div>
+        {s.glass !== "off" && (
+          <Row title="Плотность стекла">
+            <input
+              type="range" aria-label={t("Прозрачность")} className="slider set-slider" min={0.15} max={0.9} step={0.05} value={s.glassOpacity}
+              onChange={(e) => s.set({ glassOpacity: Number(e.target.value) })}
+              style={{ ["--pct" as string]: `${((s.glassOpacity - 0.15) / 0.75) * 100}%` }}
+            />
+          </Row>
         )}
+        <Row title="Живой фон" hint="Эффект за панелями приложения">
+          <Seg value={s.bgEffect} onChange={(v) => s.set({ bgEffect: v })} options={[["none", "Нет"], ["aurora", "Аврора"], ["cover", "Обложка"], ["stars", "Звёзды"], ["grain", "Плёнка"]]} />
+        </Row>
+            </section>
+
+            <section className="set-card">
+              <h3>{t("Живые детали")}</h3>
         <Row title="«Моя волна» в такт музыке" hint="Свечение вокруг «Моей волны» пульсирует под басы">
           <Toggle checked={s.heroBeat} onChange={(v) => s.set({ heroBeat: v })} label={t("«Моя волна» в такт музыке")} />
-        </Row>
-        <Row title="Цвет из обложки" hint="Акцентный цвет подстраивается под обложку играющего трека">
-          <Toggle checked={s.dynamicAccent} onChange={(v) => s.set({ dynamicAccent: v })} label={t("Цвет из обложки")} />
         </Row>
         <Row title="Визуализатор" hint="Спектр музыки тонкой полосой над плеером">
           <Toggle checked={s.visualizer} onChange={(v) => s.set({ visualizer: v })} label={t("Визуализатор")} />
@@ -217,23 +348,65 @@ export function Settings() {
         <Row title="3D-наклон карточек" hint="Плейлисты наклоняются и бликуют за курсором">
           <Toggle checked={s.tilt} onChange={(v) => s.set({ tilt: v })} label={t("3D-наклон карточек")} />
         </Row>
-        <Row title="Скругление углов">
-          <Seg value={s.radius} onChange={(v) => s.set({ radius: v })} options={[["sharp", "Острые"], ["normal", "Обычные"], ["round", "Круглые"]]} />
-        </Row>
-        <Row title="Масштаб интерфейса">
-          <Seg value={String(s.scale)} onChange={(v) => s.set({ scale: Number(v) })} options={[["0.9", "90%"], ["1", "100%"], ["1.1", "110%"], ["1.25", "125%"]]} />
-        </Row>
-      </section>
+            </section>
+          </>}
 
-      <section className="set-card">
-        <h3>{t("Окно")}</h3>
+          {tab === "app" && <>
+            <section className="set-card">
+              <h3>{t("Окно")}</h3>
         <Row title="Сворачивать в трей при закрытии" hint="Музыка продолжит играть, Melo останется у часов. Выйти — через значок в трее">
           <Toggle checked={s.closeToTray} onChange={(v) => s.set({ closeToTray: v })} label={t("Сворачивать в трей при закрытии")} />
         </Row>
-      </section>
+            </section>
+            <section className="set-card">
+              <h3>{t("Обновления")}</h3>
+        <Row title="Проверять обновления" hint="Melo сам узнаёт о новой версии на GitHub и предлагает обновиться">
+          <Toggle checked={s.autoUpdate} onChange={(v) => s.set({ autoUpdate: v })} label={t("Проверять обновления")} />
+        </Row>
+        <div className="row-gap upd-row">
+          <button className="btn secondary sm-btn" disabled={upd.status === "checking" || upd.status === "downloading"} onClick={() => upd.check(true)}>
+            <RefreshCw size={15} className={upd.status === "checking" ? "spin" : ""} /> {t("Проверить обновления")}
+          </button>
+          <small className="faint">
+            {upd.status === "latest" && t("У вас последняя версия")}
+            {upd.status === "available" && upd.info && t("Доступна версия {v}", { v: upd.info.version })}
+            {upd.status === "error" && upd.error}
+          </small>
+        </div>
+            </section>
+            <section className="set-card">
+              <h3>{t("Горячие клавиши")}</h3>
+        <div className="keys">
+          {([
+            ["Space", "Играть / пауза"],
+            ["Ctrl + →", "Следующий трек"],
+            ["Ctrl + ←", "Предыдущий трек"],
+            ["→ / ←", "Перемотка на 5 секунд"],
+            ["↑ / ↓", "Громкость"],
+            ["Ctrl + F", "Поиск"],
+            ["Alt + ← / →", "Назад / вперёд"],
+          ] as const).map(([k, label]) => (
+            <div key={k} className="key-row"><span>{t(label)}</span><kbd>{k}</kbd></div>
+          ))}
+        </div>
+        <small className="faint">{t("Медиаклавиши клавиатуры и плашка Windows тоже работают")}</small>
+            </section>
+            <section className="set-card">
+              <h3>{t("Сброс")}</h3>
+              <div className="row-gap">
+                <button className="btn secondary sm-btn" onClick={() => window.dispatchEvent(new Event("melo:welcome"))}>
+                  <Sparkles size={15} /> {t("Показать приветствие")}
+                </button>
+                <button className="btn secondary sm-btn" onClick={() => { s.reset(); ui.toast("Настройки сброшены"); }}>
+                  <RotateCcw size={15} /> {t("Сбросить все настройки")}
+                </button>
+              </div>
+            </section>
+          </>}
 
-      <section className="set-card">
-        <h3>{t("Аккаунты ВКонтакте")}</h3>
+          {tab === "account" && (
+            <section className="set-card">
+              <h3>{t("Аккаунты ВКонтакте")}</h3>
         <div className="acc-list">
           {lib.accounts.map((a) => (
             <div key={a.user_id} className={`acc-item ${a.active ? "active" : ""}`}>
@@ -256,28 +429,12 @@ export function Settings() {
           ))}
         </div>
         <button className="btn secondary sm-btn self-start" onClick={lib.addAccount}><UserPlus size={15} /> {t("Добавить аккаунт")}</button>
-      </section>
+            </section>
+          )}
 
-      <section className="set-card">
-        <h3>{t("Горячие клавиши")}</h3>
-        <div className="keys">
-          {([
-            ["Space", "Играть / пауза"],
-            ["Ctrl + →", "Следующий трек"],
-            ["Ctrl + ←", "Предыдущий трек"],
-            ["→ / ←", "Перемотка на 5 секунд"],
-            ["↑ / ↓", "Громкость"],
-            ["Ctrl + F", "Поиск"],
-            ["Alt + ← / →", "Назад / вперёд"],
-          ] as const).map(([k, label]) => (
-            <div key={k} className="key-row"><span>{t(label)}</span><kbd>{k}</kbd></div>
-          ))}
-        </div>
-        <small className="faint">{t("Медиаклавиши клавиатуры и плашка Windows тоже работают")}</small>
-      </section>
-
-      <section className="set-card">
-        <h3>{t("О приложении")}</h3>
+          {tab === "about" && (
+            <section className="set-card">
+              <h3>{t("О приложении")}</h3>
         <div className="info-grid">
           <span>{t("Версия")}</span><b>{info?.version ?? "—"}</b>
           <span>{t("Вход через")}</span><b>{info?.client === "vk_android" ? "VK Android (QR)" : info?.client === "kate" ? "Kate Mobile" : info?.client ?? "—"}</b>
@@ -291,38 +448,25 @@ export function Settings() {
             )}
           </b>
         </div>
-        <Row title="Проверять обновления" hint="Melo сам узнаёт о новой версии на GitHub и предлагает обновиться">
-          <Toggle checked={s.autoUpdate} onChange={(v) => s.set({ autoUpdate: v })} label={t("Проверять обновления")} />
-        </Row>
-        <div className="row-gap upd-row">
-          <button className="btn secondary sm-btn" disabled={upd.status === "checking" || upd.status === "downloading"} onClick={() => upd.check(true)}>
-            <RefreshCw size={15} className={upd.status === "checking" ? "spin" : ""} /> {t("Проверить обновления")}
-          </button>
-          <small className="faint">
-            {upd.status === "latest" && t("У вас последняя версия")}
-            {upd.status === "available" && upd.info && t("Доступна версия {v}", { v: upd.info.version })}
-            {upd.status === "error" && upd.error}
-          </small>
+              <small className="faint">
+                {t("Ключи входа хранятся только на этом компьютере, в папке данных. Melo не собирает статистику и не отправляет ничего, кроме запросов к ВКонтакте.")}
+              </small>
+              <button className="btn secondary sm-btn self-start" onClick={() => setDoc("terms")}>
+                <FileText size={15} /> {t("Соглашение и конфиденциальность")}
+              </button>
+            </section>
+          )}
+          </div>
         </div>
-        <small className="faint">
-          {t("Ключи входа хранятся только на этом компьютере, в папке данных. Melo не собирает статистику и не отправляет ничего, кроме запросов к ВКонтакте.")}
-        </small>
-        <button className="btn secondary sm-btn self-start" onClick={() => setDoc("terms")}>
-          <FileText size={15} /> {t("Соглашение и конфиденциальность")}
-        </button>
-        {confirmOut && (
+      </div>
+      {confirmOut && (
         <Dialog title="Выйти из аккаунта ВКонтакте?" text={t("Музыка и плейлисты ВК будут недоступны, пока вы снова не войдёте через QR-код или страницу ВК.")} danger confirm="Выйти"
           icon={<LogOut size={22} />} onClose={() => setConfirmOut(false)}
           onConfirm={async () => { setConfirmOut(false); await lib.logout(); }} />
       )}
       {doc && <LegalDialog doc={doc} onClose={() => setDoc(null)} />}
-        <button className="btn secondary sm-btn self-start" onClick={() => window.dispatchEvent(new Event("melo:welcome"))}>
-          <Sparkles size={15} /> {t("Показать приветствие")}
-        </button>
-        <button className="btn secondary sm-btn self-start" onClick={() => { s.reset(); ui.toast("Настройки сброшены"); }}>
-          <RotateCcw size={15} /> {t("Сбросить все настройки")}
-        </button>
-      </section>
     </div>
   );
-}
+});
+
+

@@ -112,6 +112,8 @@ export function TrackList({ tracks, showAlbum = true, onMove, onRemove, removeLa
   const [intro, setIntro] = useState(true);
   const dragging = useRef(false);
   const justDragged = useRef(false);
+  const cancelDrag = useRef<(() => void) | null>(null);
+  useEffect(() => () => { cancelDrag.current?.(); }, []);
 
   // Свежие значения для стабильных обработчиков (строки мемоизированы)
   const live = useRef({ tracks, onMove, p, lib, rowH });
@@ -155,6 +157,7 @@ export function TrackList({ tracks, showAlbum = true, onMove, onRemove, removeLa
   // ---------- Перетаскивание: всё через DOM, без перерисовок React ----------
   const press = useCallback((e: React.PointerEvent, from: number) => {
     if (!live.current.onMove || e.button !== 0 || (e.target as Element).closest("button")) return;
+    cancelDrag.current?.();
     const row = e.currentTarget as HTMLElement;
     const list = listRef.current!;
     const body = bodyRef.current!;
@@ -223,7 +226,9 @@ export function TrackList({ tracks, showAlbum = true, onMove, onRemove, removeLa
       lastY = ev.clientY;
       if (!started && Math.hypot(ev.clientX - sx, lastY - sy) >= 5) begin();
     };
-    const up = () => {
+    const finish = (commit: boolean) => {
+      cancelDrag.current = null;
+      window.removeEventListener("blur", cancel);
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", up);
@@ -243,9 +248,13 @@ export function TrackList({ tracks, showAlbum = true, onMove, onRemove, removeLa
       justDragged.current = true;
       setTimeout(() => (justDragged.current = false), 60);
       const to = target > from ? target - 1 : target;
-      if (to !== from) live.current.onMove?.(from, to);
+      if (commit && to !== from) live.current.onMove?.(from, to);
       requestAnimationFrame(() => requestAnimationFrame(() => list.classList.remove("no-trans")));
     };
+    const up = () => finish(true);
+    const cancel = () => finish(false);
+    cancelDrag.current = cancel;
+    window.addEventListener("blur", cancel);
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", up);

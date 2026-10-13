@@ -11,7 +11,8 @@ export function QueuePanel() {
   const ui = useUi();
   const t = useT();
   if (!ui.queueOpen) return null;
-  const upcoming = p.queue.map((t, i) => ({ t, i })).slice(p.index + 1);
+  const upcomingCount = Math.max(0, p.queue.length - p.index - 1);
+  const upcoming = p.queue.slice(p.index + 1, p.index + 201).map((t, j) => ({ t, i: p.index + 1 + j }));
 
   return (
     <aside className="queue">
@@ -28,7 +29,7 @@ export function QueuePanel() {
           </div>
         </>
       )}
-      <small className="queue-label">{t("Далее · {n}", { n: upcoming.length })}</small>
+      <small className="queue-label">{t("Далее · {n}", { n: upcomingCount })}</small>
       <div className="queue-list">
         {upcoming.length === 0 && <span className="muted queue-empty">{t("Очередь пуста")}</span>}
         {upcoming.slice(0, 200).map(({ t: tr, i }) => (

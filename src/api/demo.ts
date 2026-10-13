@@ -130,6 +130,10 @@ export const demoApi: MusicApi = {
       lines: ["Ночь опять зовёт меня", "Город в огнях, и я один", "", "Этот трек — просто демо", "Тут будет настоящий текст", "Из ВКонтакте, строка за строкой", "", "И подсветка в такт музыке"].map((text, i) => ({ time: 2 + i * 4, text })),
     }),
   similar: (tr) => wait(all().filter((x) => x.id !== tr.id).sort(() => Math.random() - 0.5).slice(0, 10)),
+  vkShelves: () => wait([
+    { title: "Собрано алгоритмами", items: ["Для вас", "Открытия", "Новинки", "Плейлист дня 1"].map((title, i) => ({ ...pls[i % pls.length], id: `-147845620_${900 + i}`, ownerId: -147845620, title, cover: undefined, count: 100 })) },
+    { title: "Плейлисты дня", items: pls.slice(0, 4) },
+  ]),
   reorder: () => wait(undefined),
   accounts: () => wait([{ user_id: 1, name: "skymywex", active: true }, { user_id: 2, name: "Второй аккаунт", active: false }]),
   switchAccount: () => wait(undefined),

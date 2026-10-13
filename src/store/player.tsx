@@ -1,6 +1,8 @@
 import { antiBlur } from "./antiblur";
-import { createContext, ReactNode, useCallback, useContext, useEffect, useRef, useState } from "react";
-import Hls from "hls.js";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useRef, useState, useMemo, useSyncExternalStore } from "react";
+import type Hls from "hls.js";
+// Don't parse the HLS engine for login, navigation, local files or MP3 playback.
+const loadHls = () => import("hls.js").then((module) => module.default);
 import { api } from "../api";
 import { Track } from "../types";
 import { useUi } from "./ui";
@@ -32,6 +34,8 @@ type PlayerState = {
   cycleRepeat: () => void;
   playNext: (t: Track) => void;
   enqueue: (t: Track) => void;
+  /** Тихо дописать треки в конец очереди (без повторов) — для бесконечной «Моей волны». */
+  append: (tracks: Track[]) => void;
   /** Заменить всё, что играет после текущего трека. */
   replaceUpcoming: (tracks: Track[]) => void;
   /** Подменить играющий трек другой версией, сохранив позицию. */
@@ -43,6 +47,27 @@ type PlayerState = {
 };
 
 const Ctx = createContext<PlayerState | null>(null);
+// Playback ticks must not invalidate every page, list and effect consumer.
+function createClock() {
+  let position = 0;
+  const listeners = new Set<() => void>();
+  return {
+    get: () => position,
+    subscribe: (fn: () => void) => { listeners.add(fn); return () => { listeners.delete(fn); }; },
+    set: (value: number) => {
+      if (!Number.isFinite(value) || value === position) return;
+      position = value;
+      listeners.forEach((fn) => fn());
+    },
+  };
+}
+const ClockCtx = createContext<ReturnType<typeof createClock> | null>(null);
+const noSubscribe = () => () => {};
+export function usePlaybackPosition(enabled = true) {
+  const clock = useContext(ClockCtx);
+  if (!clock) throw new Error("usePlaybackPosition вне PlayerProvider");
+  return useSyncExternalStore(enabled ? clock.subscribe : noSubscribe, clock.get, clock.get);
+}
 const saved = <T,>(key: string, def: T): T => {
   try {
     const v = localStorage.getItem(key);
@@ -77,7 +102,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [index, setIndex] = useState(-1);
   const [playing, setPlaying] = useState(false);
   const [buffering, setBuffering] = useState(false);
-  const [position, setPosition] = useState(0);
+  const [clock] = useState(createClock);
+  const setPosition = clock.set;
   const [duration, setDuration] = useState(0);
   const [volume, setVolumeState] = useState<number>(() => saved("melo.volume", 0.7));
   const [shuffle, setShuffle] = useState<boolean>(() => saved("melo.shuffle", false));
@@ -114,6 +140,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const tried = altTried.current.get(orig.id) ?? new Set<string>([orig.id]);
     tried.add(t.id);
     altTried.current.set(orig.id, tried);
+    if (altTried.current.size > 64) altTried.current.delete(altTried.current.keys().next().value!);
     if (t.id.startsWith("off:") || tried.size > 6) {
       setBuffering(false);
       toast("Не удалось загрузить трек: {e}", { e: why });
@@ -170,9 +197,16 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       playingTrack.current = track;
 
       const src = api.streamUrl(track.url!);
-      if (track.url!.includes(".m3u8") && Hls.isSupported()) {
-        const h = new Hls({ enableWorker: true, maxBufferLength: 30, maxMaxBufferLength: 60, backBufferLength: 15, maxBufferSize: 20 * 1000 * 1000 });
-        h.on(Hls.Events.ERROR, (_, d) => {
+      let HlsEngine: Awaited<ReturnType<typeof loadHls>> | null = null;
+      if (track.url!.includes(".m3u8")) {
+        setBuffering(true);
+        try { HlsEngine = await loadHls(); }
+        catch { return altRef.current(track, autoplay, "не удалось загрузить движок HLS"); }
+        if (seq !== loadSeq.current) return true;
+      }
+      if (HlsEngine?.isSupported()) {
+        const h = new HlsEngine({ enableWorker: true, maxBufferLength: 30, maxMaxBufferLength: 60, backBufferLength: 15, maxBufferSize: 20 * 1000 * 1000 });
+        h.on(HlsEngine.Events.ERROR, (_, d) => {
           if (!d.fatal || seq !== loadSeq.current) return;
           if (!retried.current) load(t, autoplay, true);
           else {
@@ -255,7 +289,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         () => {
           if (state.current.repeat === "one") {
             el.currentTime = 0;
-            el.play();
+            setPosition(0);
+            el.play().catch(() => {});
           } else next();
         },
       ],
@@ -324,12 +359,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const key = resumeKey.current;
     if (!key || !settings.resume) return;
+    if (!queue.length) return;
+    const from = Math.max(0, index - 100);
+    const prefix = JSON.stringify({ queue: queue.slice(from, from + 300), index: index - from }).slice(0, -1);
+    let lastSaved = -1;
     const save = () => {
-      if (!state.current.queue.length) return;
-      const i = state.current.index;
-      const q = state.current.queue;
-      const from = Math.max(0, i - 100);
-      localStorage.setItem(key, JSON.stringify({ queue: q.slice(from, from + 300), index: i - from, position: audio.current.currentTime }));
+      const pos = audio.current.currentTime;
+      if (pos === lastSaved) return;
+      try { localStorage.setItem(key, `${prefix},"position":${Number.isFinite(pos) ? pos : 0}}`); lastSaved = pos; }
+      catch { /* Full storage must not interrupt playback. */ }
     };
     save();
     const timer = window.setInterval(save, 5000);
@@ -342,7 +380,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   const prev = useCallback(() => {
     const el = audio.current;
-    if (el.currentTime > 3 || index <= 0) el.currentTime = 0;
+    if (el.currentTime > 3 || index <= 0) { el.currentTime = 0; setPosition(0); }
     else goTo(index - 1);
   }, [index, goTo]);
 
@@ -373,13 +411,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     goTo(i);
   };
 
-  const value: PlayerState = {
+  const value = useMemo<PlayerState>(() => ({
     queue,
     index,
     current,
     playing,
     buffering,
-    position,
+    get position() { return clock.get(); },
     duration,
     volume,
     shuffle,
@@ -412,7 +450,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     cycleRepeat: () => setRepeat((r) => (r === "off" ? "all" : r === "all" ? "one" : "off")),
     playNext: (t) => {
       if (!current) return startList([t], 0);
-      setQueue((q) => [...q.slice(0, index + 1), t, ...q.slice(index + 1)]);
+      const q = [...state.current.queue.slice(0, index + 1), t, ...state.current.queue.slice(index + 1)];
+      original.current = [...original.current.slice(0, original.current.findIndex((x) => x.id === current.id) + 1), t, ...original.current.slice(original.current.findIndex((x) => x.id === current.id) + 1)];
+      state.current.queue = q;
+      setQueue(q);
       toast("Сыграет следующим");
     },
     replaceUpcoming: (list) => {
@@ -441,9 +482,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         else el.addEventListener("loadedmetadata", apply, { once: true });
       });
     },
+    append: (list) => {
+      if (!current) return list.length ? startList(list, 0) : undefined;
+      const have = new Set(state.current.queue.map((x) => x.id));
+      const add = list.filter((x) => !have.has(x.id) && (have.add(x.id), true));
+      if (!add.length) return;
+      original.current = [...original.current, ...add];
+      const q = [...state.current.queue, ...add];
+      state.current.queue = q;
+      setQueue(q);
+    },
     enqueue: (t) => {
       if (!current) return startList([t], 0);
-      setQueue((q) => [...q, t]);
+      const q = [...state.current.queue, t];
+      original.current = [...original.current, t];
+      state.current.queue = q;
+      setQueue(q);
       toast("Добавлено в очередь");
     },
     restore: (userId) => {
@@ -471,25 +525,48 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
     },
     stop: () => {
+      clearInterval(fadeTimer.current);
       resumeKey.current = null;
       loadSeq.current++;
       hls.current?.destroy();
       hls.current = null;
       audio.current.pause();
       audio.current.removeAttribute("src");
+      audio.current.load();
+      original.current = [];
+      altTried.current.clear();
+      playingTrack.current = null;
       state.current.queue = [];
+      state.current.index = -1;
+      setPlaying(false);
+      setBuffering(false);
+      setDuration(0);
       setQueue([]);
       setIndex(-1);
       setPosition(0);
     },
     removeAt: (i) => {
-      if (i === index) return;
-      setQueue((q) => q.filter((_, k) => k !== i));
-      if (i < index) setIndex((x) => x - 1);
+      const previous = state.current.queue;
+      if (i === state.current.index || i < 0 || i >= previous.length) return;
+      const removed = previous[i], at = original.current.indexOf(removed);
+      if (at >= 0) original.current = original.current.filter((_, k) => k !== at);
+      const q = previous.filter((_, k) => k !== i);
+      state.current.queue = q;
+      setQueue(q);
+      if (i < state.current.index) { state.current.index--; setIndex(state.current.index); }
     },
-  };
+  }), [queue, index, current, playing, buffering, duration, volume, shuffle, repeat, toggle, next, prev, goTo, load, toast, settings.resume, clock]);
 
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  useEffect(() => () => {
+    loadSeq.current++;
+    clearInterval(fadeTimer.current);
+    hls.current?.destroy();
+    audio.current.pause();
+    audio.current.removeAttribute("src");
+    audio.current.load();
+  }, []);
+
+  return <ClockCtx.Provider value={clock}><Ctx.Provider value={value}>{children}</Ctx.Provider></ClockCtx.Provider>;
 }
 
 export const usePlayer = () => {

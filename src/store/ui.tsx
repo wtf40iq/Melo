@@ -1,4 +1,4 @@
-import { createContext, ReactNode, useCallback, useContext, useRef, useState } from "react";
+import { createContext, ReactNode, useCallback, useContext, useRef, useState, useMemo, useEffect } from "react";
 import { Artist, Playlist } from "../types";
 
 export type Route =
@@ -11,7 +11,8 @@ export type Route =
   | { name: "artist"; artist: Artist }
   | { name: "deep"; artist?: string; title?: string }
   | { name: "offline" }
-  | { name: "offline-pl"; id: string };
+  | { name: "offline-pl"; id: string }
+  | { name: "mix"; id: string };
 
 export type ToastParams = Record<string, string | number>;
 export type ToastOptions = { action?: { label: string; run: () => void }; duration?: number };
@@ -32,15 +33,21 @@ type UiState = {
   setLyricsOpen: (v: boolean) => void;
   toast: (text: string, params?: ToastParams, opts?: ToastOptions) => void;
   dismissToast: (id: number) => void;
-  toasts: Toast[];
 };
 
 const Ctx = createContext<UiState | null>(null);
+const ToastCtx = createContext<{ toasts: Toast[]; dismissToast: (id: number) => void } | null>(null);
+export const useToasts = () => {
+  const value = useContext(ToastCtx);
+  if (!value) throw new Error("useToasts вне UiProvider");
+  return value;
+};
 const same = (a: Route, b: Route) =>
   a.name === b.name &&
   (a.name !== "playlist" || (b.name === "playlist" && a.playlist.id === b.playlist.id)) &&
   (a.name !== "artist" || (b.name === "artist" && (a.artist.id ?? a.artist.name) === (b.artist.id ?? b.artist.name))) &&
   (a.name !== "offline-pl" || (b.name === "offline-pl" && a.id === b.id)) &&
+  (a.name !== "mix" || (b.name === "mix" && a.id === b.id)) &&
   a.name !== "deep";
 
 export function UiProvider({ children }: { children: ReactNode }) {
@@ -54,17 +61,23 @@ export function UiProvider({ children }: { children: ReactNode }) {
   const setLyricsOpen = useCallback((v: boolean) => { setLyricsOpenRaw(v); if (v) setQueueOpenRaw(false); }, []);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
+  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
+  useEffect(() => () => { timers.current.forEach(clearTimeout); timers.current.clear(); }, []);
 
   const dismissToast = useCallback((id: number) => setToasts((t) => t.filter((x) => x.id !== id)), []);
   const toast = useCallback((text: string, params?: ToastParams, opts?: ToastOptions) => {
     const id = nextId.current++;
     const duration = opts?.duration ?? (opts?.action ? 5000 : 3200);
     setToasts((t) => [...t.slice(-2), { id, text, params, action: opts?.action, duration }]);
-    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), duration);
+    const timer = setTimeout(() => {
+      timers.current.delete(timer);
+      setToasts((t) => t.filter((x) => x.id !== id));
+    }, duration);
+    timers.current.add(timer);
   }, []);
 
   const route = history[pos];
-  const value: UiState = {
+  const value = useMemo<UiState>(() => ({
     route,
     canBack: pos > 0,
     canForward: pos < history.length - 1,
@@ -84,9 +97,9 @@ export function UiProvider({ children }: { children: ReactNode }) {
     setLyricsOpen,
     toast,
     dismissToast,
-    toasts,
-  };
-  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
+  }), [route, history, pos, query, queueOpen, lyricsOpen, setQueueOpen, setLyricsOpen, toast, dismissToast]);
+  const notices = useMemo(() => ({ toasts, dismissToast }), [toasts, dismissToast]);
+  return <Ctx.Provider value={value}><ToastCtx.Provider value={notices}>{children}</ToastCtx.Provider></Ctx.Provider>;
 }
 
 export const useUi = () => {
@@ -97,6 +110,7 @@ export const useUi = () => {
 
 export const errorText = (e: unknown) => {
   const s = String((e as Error)?.message ?? e);
+  if (s.includes("session_expired")) return "Сессия ВК закончилась — продлите вход";
   if (s.includes("not_authorized")) return "Сессия истекла, войдите снова";
   return s;
 };

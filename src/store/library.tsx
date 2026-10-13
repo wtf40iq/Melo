@@ -1,4 +1,4 @@
-import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState, useRef } from "react";
 import { api } from "../api";
 import { Account } from "../api/types";
 import { Playlist, Profile, Track, trackKey } from "../types";
@@ -56,6 +56,8 @@ export function lastVkKick(): string | null {
 
 export function LibraryProvider({ children }: { children: ReactNode }) {
   const { toast } = useUi();
+  const generation = useRef(0);
+  const loadingPage = useRef(false);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [booting, setBooting] = useState(true);
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -82,23 +84,30 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
 
   const loadPage = useCallback(
     async (offset: number) => {
+      if (loadingPage.current) return;
+      loadingPage.current = true;
+      const gen = generation.current;
       setLoadingTracks(true);
       try {
         const page = await api.myTracks(offset, PAGE);
+        if (gen !== generation.current) return;
         setTracks((prev) => (offset === 0 ? page.items : [...prev, ...page.items]));
         setTotal(page.total);
       } catch (e) {
-        fail(e);
+        if (gen === generation.current) fail(e);
       } finally {
-        setLoadingTracks(false);
+        if (gen === generation.current) { loadingPage.current = false; setLoadingTracks(false); }
       }
     },
     [fail],
   );
 
   const reloadPlaylists = useCallback(() => {
+    const gen = generation.current;
     setPlaylistsLoading(true);
-    api.myPlaylists().then(setPlaylists).catch(fail).finally(() => setPlaylistsLoading(false));
+    api.myPlaylists().then((list) => { if (gen === generation.current) setPlaylists(list); })
+      .catch((e) => { if (gen === generation.current) fail(e); })
+      .finally(() => { if (gen === generation.current) setPlaylistsLoading(false); });
   }, [fail]);
 
   useEffect(() => {
@@ -111,6 +120,8 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     reloadAccounts();
+    generation.current++;
+    loadingPage.current = false;
     if (!profile) return;
     localStorage.removeItem("melo.vkKick");
     setReturnTo(null);
@@ -121,6 +132,10 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
   }, [profile, loadPage, reloadPlaylists, reloadAccounts]);
 
   const clear = () => {
+    generation.current++;
+    loadingPage.current = false;
+    setLoadingTracks(false);
+    setPlaylistsLoading(false);
     setTracks([]);
     setTotal(0);
     setPlaylists([]);
@@ -181,7 +196,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const value: LibraryState = {
+  const value: LibraryState = useMemo(() => ({
     profile,
     booting,
     login: async () => {
@@ -288,7 +303,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
         return false;
       }
     },
-  };
+  }), [profile, booting, tracks, total, loadingTracks, playlists, playlistsLoading, accounts, returnTo, fail, toast, isMine, reloadAccounts, reloadPlaylists, loadPage]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

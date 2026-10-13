@@ -3,7 +3,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { api } from "../api";
 import { usePlayer } from "../store/player";
 import { useSettings } from "../store/settings";
+import { Stars } from "./Stars";
 import { FireCursor } from "./FireCursor";
+import { onVisualActivity, visualsActive } from "../visualActivity";
 
 const inTauri = "__TAURI_INTERNALS__" in window;
 
@@ -38,7 +40,17 @@ const hexToHsl = (hex: string): [number, number, number] => {
 const MONO = "#dfe3ea";
 
 /** Главный «живой» цвет обложки: самый весомый оттенок, яркий и насыщенный для акцента. */
-async function dominantColor(src: string): Promise<string | null> {
+const colorCache = new Map<string, Promise<string | null>>();
+function dominantColor(src: string): Promise<string | null> {
+  const hit = colorCache.get(src);
+  if (hit) return hit;
+  const result = extractColor(src);
+  colorCache.set(src, result);
+  if (colorCache.size > 24) colorCache.delete(colorCache.keys().next().value!);
+  result.then((value) => { if (!value && colorCache.get(src) === result) colorCache.delete(src); });
+  return result;
+}
+async function extractColor(src: string): Promise<string | null> {
   const tries = inTauri && src.startsWith("http") ? [api.streamUrl(src), src] : [src];
   for (const url of tries) {
     try {
@@ -93,39 +105,6 @@ async function dominantColor(src: string): Promise<string | null> {
     }
   }
   return null;
-}
-
-export function Stars() {
-  const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const c = ref.current!;
-    const g = c.getContext("2d")!;
-    let raf = 0;
-    const stars = Array.from({ length: 140 }, () => ({
-      x: Math.random(), y: Math.random(), z: Math.random() * 0.8 + 0.2, t: Math.random() * Math.PI * 2,
-    }));
-    const draw = () => {
-      const w = (c.width = window.innerWidth);
-      const h = (c.height = window.innerHeight);
-      g.clearRect(0, 0, w, h);
-      const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#fff";
-      for (const s of stars) {
-        s.y -= 0.00012 * s.z;
-        s.t += 0.02 * s.z;
-        if (s.y < 0) { s.y = 1; s.x = Math.random(); }
-        const a = 0.25 + 0.55 * (0.5 + 0.5 * Math.sin(s.t));
-        g.globalAlpha = a * s.z;
-        g.fillStyle = s.z > 0.85 ? accent : "#fff";
-        g.beginPath();
-        g.arc(s.x * w, s.y * h, s.z * 1.6, 0, Math.PI * 2);
-        g.fill();
-      }
-      raf = requestAnimationFrame(draw);
-    };
-    draw();
-    return () => cancelAnimationFrame(raf);
-  }, []);
-  return <canvas ref={ref} className="fx-stars" />;
 }
 
 // Фоновые эффекты, свечение за курсором, наклон карточек, стекло и цвет из обложки.
@@ -188,17 +167,30 @@ export function Effects() {
   useEffect(() => {
     if (!s.cursorGlow) return;
     let raf = 0;
-    let x = -999, y = -999, cx = x, cy = y;
-    const move = (e: MouseEvent) => { x = e.clientX; y = e.clientY; if (cx < -900) { cx = x; cy = y; } };
-    const loop = () => {
-      cx += (x - cx) * 0.18;
-      cy += (y - cy) * 0.18;
-      glow.current?.style.setProperty("transform", `translate(${cx}px, ${cy}px)`);
-      raf = requestAnimationFrame(loop);
+    let x = -999, y = -999, cx = x, cy = y, last = 0;
+    const loop = (now: number) => {
+      raf = 0;
+      if (!visualsActive()) return;
+      const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
+      last = now;
+      const k = 1 - Math.exp(-12 * dt);
+      cx += (x - cx) * k; cy += (y - cy) * k;
+      const moving = Math.abs(x - cx) + Math.abs(y - cy) > 0.15;
+      if (!moving) { cx = x; cy = y; }
+      glow.current?.style.setProperty("transform", `translate3d(${cx.toFixed(2)}px, ${cy.toFixed(2)}px, 0)`);
+      if (moving) raf = requestAnimationFrame(loop);
     };
+    const move = (e: MouseEvent) => {
+      x = e.clientX; y = e.clientY;
+      if (cx < -900) { cx = x; cy = y; }
+      if (!raf && visualsActive()) { last = 0; raf = requestAnimationFrame(loop); }
+    };
+    const off = onVisualActivity((active) => {
+      if (!active) { cancelAnimationFrame(raf); raf = 0; }
+      else if (x > -900 && !raf) { last = 0; raf = requestAnimationFrame(loop); }
+    });
     window.addEventListener("mousemove", move, { passive: true });
-    raf = requestAnimationFrame(loop);
-    return () => { window.removeEventListener("mousemove", move); cancelAnimationFrame(raf); };
+    return () => { off(); window.removeEventListener("mousemove", move); cancelAnimationFrame(raf); };
   }, [s.cursorGlow]);
 
   // Плавная прокрутка колесиком
@@ -206,6 +198,7 @@ export function Effects() {
     if (!s.smoothScroll || s.animations === "off") return;
     type St = { pos: number; seen: number; target: number; raf: number };
     const states = new WeakMap<HTMLElement, St>();
+    const activeFrames = new Set<St>();
     const scrollable = (el: Element | null): HTMLElement | null => {
       for (let e = el as HTMLElement | null; e && e !== document.body; e = e.parentElement) {
         if (e.scrollHeight > e.clientHeight + 1) {
@@ -233,25 +226,37 @@ export function Effects() {
       st.target = Math.max(0, Math.min(max, st.target + dy * 1.1));
       const cur = st;
       const step = () => {
+        if (!el.isConnected || !visualsActive()) { cur.raf = 0; activeFrames.delete(cur); return; }
         // если прокрутку двинул кто-то ещё (перетаскивание, скроллбар) — уступаем
-        if (Math.abs(el.scrollTop - cur.seen) > 1.5) { cur.raf = 0; return; }
+        if (Math.abs(el.scrollTop - cur.seen) > 1.5) { cur.raf = 0; activeFrames.delete(cur); return; }
         cur.pos += (cur.target - cur.pos) * 0.15;
         if (Math.abs(cur.target - cur.pos) < 0.4) cur.pos = cur.target;
         el.scrollTop = cur.pos;
         cur.seen = el.scrollTop;
         cur.raf = cur.pos === cur.target ? 0 : requestAnimationFrame(step);
+        if (!cur.raf) activeFrames.delete(cur);
       };
-      if (!cur.raf) cur.raf = requestAnimationFrame(step);
+      if (!cur.raf) { activeFrames.add(cur); cur.raf = requestAnimationFrame(step); }
     };
     window.addEventListener("wheel", wheel, { passive: false });
-    return () => window.removeEventListener("wheel", wheel);
+    return () => { window.removeEventListener("wheel", wheel); activeFrames.forEach((st) => cancelAnimationFrame(st.raf)); activeFrames.clear(); };
   }, [s.smoothScroll, s.animations]);
 
   // Наклон карточек за курсором
   useEffect(() => {
     if (!s.tilt) return;
-    let last: HTMLElement | null = null;
-    const move = (e: MouseEvent) => {
+    let last: HTMLElement | null = null, pending: MouseEvent | null = null;
+    let raf = 0;
+    const reset = () => {
+      if (!last) return;
+      ["--rx", "--ry", "--mx", "--my"].forEach((key) => last?.style.removeProperty(key));
+      last.classList.remove("tilting");
+      last = null;
+    };
+    const draw = () => {
+      raf = 0;
+      const e = pending;
+      if (!e || !visualsActive()) return;
       const card = (e.target as Element)?.closest?.(".card") as HTMLElement | null;
       if (last && last !== card) { last.style.removeProperty("--rx"); last.style.removeProperty("--ry"); last.classList.remove("tilting"); }
       last = card;
@@ -265,8 +270,9 @@ export function Effects() {
       card.style.setProperty("--mx", `${((px + 0.5) * 100).toFixed(1)}%`);
       card.style.setProperty("--my", `${((py + 0.5) * 100).toFixed(1)}%`);
     };
+    const move = (e: MouseEvent) => { pending = e; if (!raf) raf = requestAnimationFrame(draw); };
     window.addEventListener("mousemove", move, { passive: true });
-    return () => window.removeEventListener("mousemove", move);
+    return () => { window.removeEventListener("mousemove", move); cancelAnimationFrame(raf); reset(); };
   }, [s.tilt]);
 
   return (

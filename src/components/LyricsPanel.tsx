@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Mic2, X } from "lucide-react";
 import { api } from "../api";
-import { usePlayer } from "../store/player";
+import { usePlayer, usePlaybackPosition } from "../store/player";
 import { useUi } from "../store/ui";
 import { useT } from "../store/settings";
 import { Lyrics } from "../types";
@@ -27,9 +27,10 @@ export function LyricsPanel() {
   }, [open, cur?.id]);
 
   const lyrics = data?.id === cur?.id ? data?.lyrics : undefined;
+  const position = usePlaybackPosition(open && !!lyrics?.synced);
   let active = -1;
   if (lyrics?.synced) {
-    for (let i = 0; i < lyrics.lines.length; i++) if ((lyrics.lines[i].time ?? 0) <= p.position + 0.25) active = i;
+    for (let i = 0; i < lyrics.lines.length; i++) if ((lyrics.lines[i].time ?? 0) <= position + 0.25) active = i;
   }
 
   // Текущая строка — по центру

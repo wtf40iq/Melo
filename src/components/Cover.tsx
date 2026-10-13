@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import { Music2 } from "lucide-react";
 
 // Если обложки нет — градиент, вычисленный из названия.
@@ -10,9 +10,11 @@ const hash = (s: string) => [...s].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >
 
 type Props = { seed: string; size?: number; radius?: number; src?: string; fill?: boolean };
 
-export function Cover({ seed, size = 40, radius = 6, src, fill }: Props) {
-  const [broken, setBroken] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+export const Cover = memo(function Cover({ seed, size = 40, radius = 6, src, fill }: Props) {
+  const [failedSrc, setFailedSrc] = useState<string>();
+  const [loadedSrc, setLoadedSrc] = useState<string>();
+  const broken = !!src && failedSrc === src;
+  const loaded = !!src && loadedSrc === src;
   const [a, b] = palettes[hash(seed) % palettes.length];
   const style = {
     width: fill ? "100%" : size,
@@ -24,10 +26,10 @@ export function Cover({ seed, size = 40, radius = 6, src, fill }: Props) {
   return (
     <div className="cover" style={style} aria-hidden>
       {src && !broken ? (
-        <img src={src} alt="" loading="lazy" draggable={false} className={loaded ? "loaded" : ""} onLoad={() => setLoaded(true)} onError={() => setBroken(true)} />
+        <img src={src} alt="" loading="lazy" draggable={false} className={loaded ? "loaded" : ""} decoding="async" onLoad={() => setLoadedSrc(src)} onError={() => setFailedSrc(src)} />
       ) : (
         <Music2 size={Math.round((fill ? 168 : size) * 0.36)} className="cover-icon" />
       )}
     </div>
   );
-}
+});

@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ExternalLink, Pause, Play, Power, SkipBack, SkipForward } from "lucide-react";
 import { Lang, translate } from "./i18n";
 import { Logo } from "./components/Logo";
-import { Stars } from "./components/Effects";
+import { Stars } from "./components/Stars";
 
 type State = { title?: string | null; artist?: string | null; cover?: string | null; playing: boolean };
 

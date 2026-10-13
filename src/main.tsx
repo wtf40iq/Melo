@@ -1,7 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import App from "./App";
-import { TrayMenu } from "./TrayMenu";
+const App = React.lazy(() => import("./App"));
+const TrayMenu = React.lazy(() => import("./TrayMenu").then((module) => ({ default: module.TrayMenu })));
 import "./styles.css";
 
 // Меню браузера по правому клику не нужно — у треков своё меню
@@ -21,6 +21,6 @@ const isTray = location.hash === "#tray";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    {isTray ? <TrayMenu /> : <App />}
+    <React.Suspense fallback={null}>{isTray ? <TrayMenu /> : <App />}</React.Suspense>
   </React.StrictMode>,
 );

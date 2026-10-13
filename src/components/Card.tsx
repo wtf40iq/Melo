@@ -3,11 +3,12 @@ import { Playlist } from "../types";
 import { Cover } from "./Cover";
 import { useSettings } from "../store/settings";
 
-export function Card({ item, onOpen, onPlay, index = 0 }: { item: Playlist; onOpen: () => void; onPlay: () => void; index?: number }) {
+export function Card({ item, onOpen, onPlay, index = 0, label }: { item: Playlist; label?: string; onOpen: () => void; onPlay: () => void; index?: number }) {
   const { t, tracks } = useSettings();
   return (
     <div className="card" style={{ ["--i" as string]: Math.min(index, 24) }} tabIndex={0} onClick={onOpen} onKeyDown={(e) => e.key === "Enter" && onOpen()}>
       <div className="card-cover">
+        {label && <div className="pl-overlay"><small>{label}</small><b>{item.title}</b></div>}
         <Cover seed={item.title} src={item.cover} radius={10} fill />
         <button
           className="card-play"

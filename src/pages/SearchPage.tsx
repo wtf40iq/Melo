@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import { api } from "../api";
-import { coverage, rankTracks } from "../api/match";
+import { coverage, rankTracks, switchLayout } from "../api/match";
 import { ArtistRow } from "../components/ArtistRow";
 import { PlaylistGrid } from "../components/PlaylistGrid";
 import { Tabs } from "../components/Tabs";
@@ -29,6 +29,9 @@ export function SearchPage({ query }: { query: string }) {
   const lib = useLibrary();
   const [tracks, setTracks] = useState<Track[] | null>(null);
   const [extras, setExtras] = useState<SearchExtras | null>(null);
+  // Запрос в другой раскладке, если по исходному почти ничего нет («ghbdtn» → «привет»)
+  const [fixed, setFixed] = useState<string | null>(null);
+  const [asTyped, setAsTyped] = useState(false);
 
   useEffect(() => {
     const id = setTimeout(() => setQ(query.trim()), 220); // ждём, пока человек допечатает
@@ -40,12 +43,34 @@ export function SearchPage({ query }: { query: string }) {
     let alive = true;
     setTracks(null);
     setExtras(null);
+    setFixed(null);
     if (!q) return;
-    api.searchTracks(q).then((r) => alive && setTracks(r)).catch((e) => { if (alive) { setTracks([]); ui.toast(errorText(e)); } });
-    api.searchExtras(q).then((r) => alive && setExtras(r)).catch(() => alive && setExtras({ playlists: [], artists: [] }));
+    const alt = asTyped ? null : switchLayout(q);
+    const extras = (x: string) => api.searchExtras(x).then((r) => alive && setExtras(r)).catch(() => alive && setExtras({ playlists: [], artists: [] }));
+    let extrasFor = q;
+    api.searchTracks(q)
+      .then(async (r) => {
+        if (!alive) return;
+        if (alt && r.length < 5) {
+          const r2 = await api.searchTracks(alt).catch(() => [] as Track[]);
+          // Берём другую раскладку, только если по ней реально нашлось то, что набрано (а не мусор ВК)
+          const hits = (list: Track[], x: string) => list.filter((tr) => coverage(x, `${tr.artist} ${tr.title}`) >= 1).length;
+          const h2 = hits(r2, alt), h1 = hits(r, q);
+          if (alive && h2 >= 3 && h2 > h1 * 2 + 1) {
+            setFixed(alt);
+            setTracks(r2);
+            if (extrasFor !== alt) { extrasFor = alt; setExtras(null); extras(alt); }
+            return;
+          }
+        }
+        if (alive) setTracks(r);
+      })
+      .catch((e) => { if (alive) { setTracks([]); ui.toast(errorText(e)); } });
+    extras(q);
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q]);
+  }, [q, asTyped]);
+  useEffect(() => setAsTyped(false), [query]);
 
   // Запрос попадает в историю, когда человек задержался на результатах
   useEffect(() => {
@@ -73,6 +98,12 @@ export function SearchPage({ query }: { query: string }) {
         <h1 className="page-title">{t("Поиск: «{q}»", { q: query.trim() })}</h1>
         <button className="btn secondary sm-btn" onClick={deep}><SlidersHorizontal size={15} /> {t("Точный поиск")}</button>
       </div>
+      {fixed && (
+        <p className="search-fix">
+          {t("Показаны результаты по запросу «{q}».", { q: fixed })}{" "}
+          <button className="link-inline" onClick={() => setAsTyped(true)}>{t("Искать «{q}»", { q: query.trim() })}</button>
+        </p>
+      )}
       <Tabs<TabId>
         value={tab}
         onChange={setTab}

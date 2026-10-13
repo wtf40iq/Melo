@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Account, AppInfo, DirectAuth, MusicApi, QrCode, QrStatus } from "./types";
 import { Artist, Lyrics, OfflinePlaylist, Playlist, Profile, Track } from "../types";
-import { coverage, dedupeTracks, isSameSong, norm, rankTracks, relevant, trackArtists, uniqueTracks, variantScore, words } from "./match";
+import { baseTitle, coverage, dedupeTracks, norm, sameSongScore, rankTracks, relevant, trackArtists, uniqueTracks, variantScore, words } from "./match";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const lang = () => {
@@ -34,14 +34,26 @@ const mapTrack = (a: any): Track => ({
 });
 
 /** Короткий кеш поиска: повторный запрос и «назад» — мгновенно. */
-const cache = new Map<string, { at: number; v: Promise<any> }>();
+const cache = new Map<string, { expires: number; v: Promise<any> }>();
+let cacheTimer: ReturnType<typeof setTimeout> | undefined;
+function clearCache() { cache.clear(); clearTimeout(cacheTimer); cacheTimer = undefined; }
+function sweepCache() {
+  const now = Date.now();
+  for (const [key, item] of cache) if (item.expires <= now) cache.delete(key);
+  cacheTimer = cache.size ? setTimeout(sweepCache, 30_000) : undefined;
+}
 function cached<T>(key: string, make: () => Promise<T>, ttl = 5 * 60_000): Promise<T> {
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < ttl) return hit.v;
-  const v = make();
-  cache.set(key, { at: Date.now(), v });
-  v.catch(() => cache.delete(key));
-  if (cache.size > 80) cache.delete(cache.keys().next().value!);
+  const scoped = `${me?.id ?? 0}:${lang()}:${key}`;
+  const now = Date.now(), hit = cache.get(scoped);
+  if (hit && now < hit.expires) {
+    cache.delete(scoped); cache.set(scoped, hit); // LRU, not unbounded retention.
+    return hit.v;
+  }
+  const v = make(), item = { expires: now + ttl, v };
+  cache.delete(scoped); cache.set(scoped, item);
+  v.catch(() => { if (cache.get(scoped) === item) cache.delete(scoped); });
+  while (cache.size > 40) cache.delete(cache.keys().next().value!);
+  if (!cacheTimer) cacheTimer = setTimeout(sweepCache, 30_000);
   return v;
 }
 
@@ -285,6 +297,7 @@ export const vkApi: MusicApi = {
   },
 
   async logout() {
+    clearCache();
     me = null;
     await invoke("vk_logout");
   },
@@ -314,9 +327,11 @@ export const vkApi: MusicApi = {
     return items(r).map(mapTrack);
   },
 
-  async popular(genreId) {
-    const r = await call("audio.getPopular", { count: 60, genre_id: genreId || undefined, only_eng: 0 });
-    return items(r).map(mapTrack);
+  popular(genreId) {
+    return cached(`popular:${genreId || 0}`, async () => {
+      const r = await call("audio.getPopular", { count: 60, genre_id: genreId || undefined, only_eng: 0 });
+      return items(r).map(mapTrack);
+    }, 60_000);
   },
 
   /**
@@ -480,17 +495,28 @@ export const vkApi: MusicApi = {
 
   variants(t) {
     return cached(`v:${t.id}`, async () => {
-      const q = `${t.artists?.[0]?.name ?? t.artist} ${t.title.replace(/[([{][^)\]}]*[)\]}]/g, " ")}`.replace(/\s+/g, " ").trim();
-      const res = await Promise.allSettled([
-        call("audio.search", { q, count: 300, auto_complete: 0 }),
-        call("audio.search", { q: `${t.artist} ${t.title}`, count: 200, auto_complete: 0 }),
-        call("audio.search", { q: `${t.title.replace(/[([{][^)\]}]*[)\]}]/g, " ")} ${t.artists?.[0]?.name ?? t.artist}`, count: 300, auto_complete: 0 }),
-      ]);
+      const who = t.artists?.[0]?.name ?? t.artist.split(/\s*(?:,|&|\bfeat\.?|\bft\.?)\s*/i)[0] ?? t.artist;
+      const title = baseTitle(t.title);
+      const qs: [string, Record<string, unknown>][] = [
+        [`${who} ${title}`, { count: 300 }],
+        [`${title} ${who}`, { count: 200 }],
+        [title, { count: 300 }], // загрузки, где исполнитель — ник залившего
+        [`${who} ${title} без цензуры`, { count: 100 }],
+        [title, { count: 100, performer_only: 1 }], // поля перепутаны: название в исполнителе
+      ];
+      if (norm(`${t.artist} ${t.title}`) !== norm(`${who} ${title}`)) qs.push([`${t.artist} ${t.title}`, { count: 200 }]);
+      const res: PromiseSettledResult<any>[] = [];
+      for (let i = 0; i < qs.length; i += 3) {
+        if (i) await new Promise((ok) => setTimeout(ok, 1050));
+        res.push(...await Promise.allSettled(qs.slice(i, i + 3).map(([q, extra]) => call("audio.search", { q, auto_complete: 0, ...extra }))));
+      }
       if (res.every((r) => r.status === "rejected")) throw (res[0] as PromiseRejectedResult).reason;
       const all = uniqueTracks(res.flatMap((r) => (r.status === "fulfilled" ? items(r.value).map(mapTrack) : [])));
       return all
-        .filter((x) => x.id !== t.id && isSameSong(t, x))
-        .map((x, i) => ({ x, s: variantScore(t, x), i }))
+        .filter((x) => x.id !== t.id)
+        .map((x, i) => ({ x, m: sameSongScore(t, x), i }))
+        .filter((v) => v.m > 0)
+        .map((v) => ({ ...v, s: variantScore(t, v.x, v.m) }))
         .sort((a, b) => b.s - a.s || a.i - b.i)
         .map((v) => v.x);
     }, 10 * 60_000);
@@ -625,17 +651,63 @@ export const vkApi: MusicApi = {
     return items(r).map(mapTrack).filter((x: Track) => x.id !== t.id);
   },
 
+  vkShelves() {
+    return cached("vk-shelves", async () => {
+      const r = await call("catalog.getAudio", { need_blocks: 1, v: CATALOG_V });
+      const shelves: { title: string; items: Playlist[] }[] = [];
+      const seen = new Set<string>();
+      const take = (resp: any) => {
+        const pools = catalogPools(resp);
+        const sec = resp?.section ?? resp?.catalog?.sections?.find((x: any) => x.id === resp?.catalog?.default_section) ?? resp?.catalog?.sections?.[0];
+        for (const b of sec?.blocks ?? []) {
+          if (b.data_type !== "music_playlists" || !b.playlists_ids?.length) continue;
+          const items: Playlist[] = [];
+          for (const id of b.playlists_ids) {
+            const p = pools.playlists.get(idKey(id));
+            if (p && !seen.has(idKey(id))) { seen.add(idKey(id)); items.push(mapPlaylist(p, me?.id)); }
+          }
+          // Название полки — в заголовке блока перед ним или в самом блоке
+          const title = b.layout?.title || b.title || "";
+          if (items.length >= 2) shelves.push({ title, items: items.slice(0, 18) });
+        }
+        // Заголовки часто лежат в отдельных блоках-«шапках» прямо перед списком
+        const blocks: any[] = sec?.blocks ?? [];
+        for (const sh of shelves) {
+          if (sh.title) continue;
+          const i = blocks.findIndex((b) => b.data_type === "music_playlists" && b.playlists_ids?.some((x: string) => sh.items.some((it) => it.id === idKey(x))));
+          for (let j = i - 1; j >= 0 && j >= i - 2; j--) {
+            const t = blocks[j]?.layout?.title || blocks[j]?.title;
+            if (t) { sh.title = t; break; }
+          }
+        }
+      };
+      take(r);
+      // На главной мало подборок — заглядываем в первые разделы каталога
+      if (shelves.length < 2) {
+        const ids: string[] = (r?.catalog?.sections ?? []).map((x: any) => x.id).filter((x: string) => x && x !== r?.catalog?.default_section).slice(0, 2);
+        for (const id of ids) {
+          const sr = await call("catalog.getSection", { section_id: id, v: CATALOG_V }).catch(() => null);
+          if (sr) take(sr);
+          if (shelves.length >= 3) break;
+        }
+      }
+      return shelves.filter((x) => x.title).slice(0, 4);
+    }, 30 * 60_000);
+  },
+
   async reorder(t, after, before) {
     await call("audio.reorder", { owner_id: t.ownerId, audio_id: t.audioId, after: after?.audioId, before: before?.audioId });
   },
 
   accounts: () => invoke<Account[]>("accounts_list"),
   async switchAccount(userId) {
+    clearCache();
     me = null;
     await invoke("account_switch", { userId });
   },
   removeAccount: (userId) => invoke("account_remove", { userId }),
   async detach() {
+    clearCache();
     me = null;
     await invoke("account_detach");
   },

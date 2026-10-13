@@ -1,6 +1,11 @@
-import { createContext, ReactNode, useContext, useEffect, useState } from "react";
+import { createContext, ReactNode, useContext, useEffect, useState, useMemo, useCallback } from "react";
 import { Lang, translate, tracksLabel } from "../i18n";
 import { EQ_PRESETS } from "./eq";
+
+/** Из чего сделана стрелка Bloom. */
+export type CursorMaterial = "glow" | "neon" | "glass" | "distort" | "jelly" | "chrome";
+export type WaveStyle = "ring" | "blast";
+export type CursorColor = "fire" | "ember" | "gold" | "pink" | "violet" | "blue" | "cyan" | "green" | "white" | "rainbow" | "accent" | "custom";
 
 export const ACCENTS = ["#5E9FE8", "#8B7CF6", "#E36FA8", "#E97366", "#DE9255", "#E2B84B", "#72BC8F", "#4FB9C9"];
 
@@ -32,9 +37,19 @@ type Settings = {
   glowSoft: number;
   /** Яркость, 0.05–0.8 */
   glowPower: number;
-  /** Курсор-огонёк со шлейфом вместо системного */
-  fireCursor: boolean;
-  fireColor: "fire" | "blue" | "violet" | "green" | "accent";
+  /** Курсор вместо системного: огонёк со шлейфом или гладкий Bloom */
+  cursorStyle: "system" | "fire" | "bloom";
+  /** Цвет курсора (огонёк, Bloom и волна при клике) */
+  fireColor: CursorColor;
+  /** Свой цвет курсора из палитры */
+  cursorCustom: string;
+  /** Ударная волна от курсора при клике */
+  clickWave: boolean;
+  cursorMaterial: CursorMaterial;
+  waveStyle: WaveStyle;
+  /** Максимальный размер волны, независимо от курсора. */
+  waveSize: number;
+  cursorHover: boolean;
   /** Длина шлейфа, 0.4–2 */
   fireTrail: number;
   /** Размер огонька, 0.6–1.8 */
@@ -85,8 +100,14 @@ const defaults: Settings = {
   glowSize: 260,
   glowSoft: 0.62,
   glowPower: 0.35,
-  fireCursor: false,
+  cursorStyle: "system",
   fireColor: "fire",
+  cursorCustom: "#ff5cc8",
+  clickWave: false,
+  cursorMaterial: "glass",
+  waveStyle: "ring",
+  waveSize: 1,
+  cursorHover: true,
   fireTrail: 1,
   fireSize: 1,
   heroBeat: true,
@@ -101,7 +122,7 @@ const defaults: Settings = {
   scale: 1,
   smoothScroll: true,
   autoUpdate: true,
-  v: 3,
+  v: 4,
 };
 
 export const DEFAULT_SETTINGS = defaults;
@@ -123,7 +144,13 @@ const load = (): Settings => {
     // v2 → v3: «Размытие» убрано (ломало перетаскивание окна), свечение курсора — переключатель
     if (saved.glass === "blur") saved.glass = "mica";
     if (typeof saved.cursorGlow === "string") saved.cursorGlow = saved.cursorGlow !== "off";
-    return { ...defaults, ...saved, v: 3 };
+    // v3 → v4: переключатель огонька стал выбором курсора
+    if (typeof saved.fireCursor === "boolean") {
+      saved.cursorStyle = saved.fireCursor ? "fire" : "system";
+      delete saved.fireCursor;
+    }
+    saved.waveSize = Math.max(0.2, Math.min(3, Number(saved.waveSize) || 1));
+    return { ...defaults, ...saved, v: 4 };
   } catch {
     return defaults;
   }
@@ -144,13 +171,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     cl.toggle("compact", s.compact);
   }, [s.animations, s.compact]);
 
-  const value: Ctx = {
+  const t = useCallback<Ctx["t"]>((key, params) => translate(s.lang, key, params), [s.lang]);
+  const tracks = useCallback((n: number) => tracksLabel(s.lang, n), [s.lang]);
+  const set = useCallback((patch: Partial<Settings>) => setS((prev) =>
+    Object.entries(patch).every(([k, v]) => Object.is(prev[k as keyof Settings], v)) ? prev : { ...prev, ...patch }), []);
+  const value = useMemo<Ctx>(() => ({
     ...s,
-    set: (patch) => setS((prev) => ({ ...prev, ...patch })),
+    set,
     reset: () => setS({ ...defaults, lang: s.lang }),
-    t: (key, params) => translate(s.lang, key, params),
-    tracks: (n) => tracksLabel(s.lang, n),
-  };
+    t, tracks,
+  }), [s, set, t, tracks]);
   return <C.Provider value={value}>{children}</C.Provider>;
 }
 

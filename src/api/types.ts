@@ -79,6 +79,8 @@ export interface MusicApi {
   lyrics(t: Track): Promise<Lyrics | null>;
   /** Похожие треки. */
   similar(t: Track): Promise<Track[]>;
+  /** Подборки ВКонтакте с главной музыкального раздела: [название полки, плейлисты]. */
+  vkShelves(): Promise<{ title: string; items: Playlist[] }[]>;
   /** Переставить трек в «Моей музыке»: соседи после перестановки. */
   reorder(t: Track, after?: Track, before?: Track): Promise<void>;
   accounts(): Promise<Account[]>;

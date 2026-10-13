@@ -4,7 +4,7 @@ import {
 import { useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { useLibrary } from "../store/library";
-import { usePlayer } from "../store/player";
+import { usePlayer, usePlaybackPosition } from "../store/player";
 import { errorText, useUi } from "../store/ui";
 import { formatTime } from "../types";
 import { Cover } from "./Cover";
@@ -26,6 +26,17 @@ function Slider({ value, max, onChange, label }: { value: number; max: number; o
       style={{ ["--pct" as string]: `${pct}%` }}
     />
   );
+}
+
+function PlaybackProgress() {
+  const p = usePlayer();
+  const position = usePlaybackPosition();
+  const tr = useT();
+  return <div className="progress">
+    <span>{formatTime(position)}</span>
+    <Slider value={position} max={p.duration} onChange={p.seek} label={tr("Перемотка")} />
+    <span>{formatTime(p.duration)}</span>
+  </div>;
 }
 
 export function PlayerBar() {
@@ -146,11 +157,7 @@ export function PlayerBar() {
             {p.repeat === "one" ? <Repeat1 size={18} /> : <Repeat size={18} />}
           </button>
         </div>
-        <div className="progress">
-          <span>{formatTime(p.position)}</span>
-          <Slider value={p.position} max={p.duration} onChange={p.seek} label={tr("Перемотка")} />
-          <span>{formatTime(p.duration)}</span>
-        </div>
+        <PlaybackProgress />
       </div>
 
       <div className="extras">
