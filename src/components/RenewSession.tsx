@@ -164,7 +164,7 @@ function RenewDialog({ expired, onClose, onDone }: { expired: boolean; onClose: 
         </p>
         <div className="renew-qr">
           {code && phase !== "loading" && phase !== "error" ? (
-            <div className="qr-box" dangerouslySetInnerHTML={{ __html: createQR(code.url, { qrSize: 200, isShowLogo: true, foregroundColor: "#121212" }) }} />
+            <div className="qr-box" dangerouslySetInnerHTML={{ __html: createQR(code.url, { qrSize: 200, isShowLogo: true, foregroundColor: "#ffffff" }) }} />
           ) : phase === "error" ? (
             <div className="renew-err">{error || t("Не удалось получить QR-код")}</div>
           ) : (

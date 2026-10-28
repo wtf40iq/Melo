@@ -368,7 +368,7 @@ export function Login() {
             <div className="qr-wrap">
               <div
                 className={`qr ${phase !== "waiting" ? "dim" : ""}`}
-                dangerouslySetInnerHTML={{ __html: createQR(code.url, { qrSize: 220, isShowLogo: true, foregroundColor: "#121212" }) }}
+                dangerouslySetInnerHTML={{ __html: createQR(code.url, { qrSize: 220, isShowLogo: true, foregroundColor: "#000000" }) }}
               />
               {phase === "scanned" && <div className="qr-overlay"><Check size={36} /><b>{t("Подтвердите вход на телефоне")}</b></div>}
               {phase === "expired" && (

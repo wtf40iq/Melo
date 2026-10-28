@@ -146,7 +146,9 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     try {
       await api.switchAccount(userId);
       clear();
-      setProfile(await api.login());
+      const acc = await api.accounts().catch(() => [] as Account[]);
+      const account = acc.find((a) => a.user_id === userId);
+      setProfile(account ? { id: userId, name: account.name ?? `id${userId}`, photo: account.photo ?? undefined } : null);
     } catch (e) {
       fail(e);
     }
@@ -221,10 +223,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       clear();
       const rest = await api.accounts().catch(() => [] as Account[]);
       setAccounts(rest);
-      if (rest.length) {
-        await api.switchAccount(rest[0].user_id);
-        setProfile(await api.login().catch(() => null));
-      } else setProfile(null);
+      setProfile(null);
     },
     accounts,
     reloadAccounts,
@@ -256,7 +255,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       next.splice(to, 0, t);
       setTracks(next);
       try {
-        await api.reorder(t, next[to - 1], next[to + 1]);
+        await api.reorder(t, to > 0 ? next[to - 1] : undefined, to < next.length - 1 ? next[to + 1] : undefined);
       } catch (e) {
         setTracks(tracks); // вернуть как было
         fail(e);

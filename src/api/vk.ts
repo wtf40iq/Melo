@@ -329,8 +329,14 @@ export const vkApi: MusicApi = {
 
   popular(genreId) {
     return cached(`popular:${genreId || 0}`, async () => {
-      const r = await call("audio.getPopular", { count: 60, genre_id: genreId || undefined, only_eng: 0 });
-      return items(r).map(mapTrack);
+      try {
+        const r = await call("audio.getPopular", { count: 60, only_eng: 0 });
+        return items(r).map(mapTrack);
+      } catch {
+        // audio.getPopular может быть недоступен для токена — пробуем рекомендации как fallback
+        const r = await call("audio.getRecommendations", { count: 60, shuffle: 1 });
+        return items(r).map(mapTrack);
+      }
     }, 60_000);
   },
 
@@ -713,9 +719,10 @@ export const vkApi: MusicApi = {
   },
   info: () => invoke<AppInfo>("app_info"),
 
-  streamUrl(url) {
+  streamUrl: async (url) => {
     // Локальный сервер из Rust: отдаёт поток, добавляет CORS (для эквалайзера) и переписывает m3u8.
     // Запасной вариант — свой протокол.
+    await streamReady;
     if (url.startsWith("offline:")) return localUrl("local", url.slice(8));
     const base = streamBase || "http://vkstream.localhost/";
     return `${base}?u=${encodeURIComponent(url)}`;

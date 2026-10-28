@@ -51,7 +51,7 @@ function dominantColor(src: string): Promise<string | null> {
   return result;
 }
 async function extractColor(src: string): Promise<string | null> {
-  const tries = inTauri && src.startsWith("http") ? [api.streamUrl(src), src] : [src];
+  const tries = inTauri && src.startsWith("http") ? [await api.streamUrl(src), src] : [src];
   for (const url of tries) {
     try {
       const img = await loadImage(url);

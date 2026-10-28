@@ -104,6 +104,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [buffering, setBuffering] = useState(false);
   const [clock] = useState(createClock);
   const setPosition = clock.set;
+  const seekingRef = useRef(false);
+  const seekingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const seekTargetRef = useRef(0);
+  const lastSeekAtRef = useRef(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolumeState] = useState<number>(() => saved("melo.volume", 0.7));
   const [shuffle, setShuffle] = useState<boolean>(() => saved("melo.shuffle", false));
@@ -171,13 +175,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
 
   // Загрузка трека в <audio>. Если ссылки нет или она протухла — берём свежую.
   const load = useCallback(
-    async (t: Track, autoplay: boolean, isRetry = false): Promise<boolean> => {
+    async (t: Track, autoplay: boolean, isRetry = false, resumeAt = 0): Promise<boolean> => {
       const seq = ++loadSeq.current;
       const el = audio.current;
       hls.current?.destroy();
       hls.current = null;
-      el.removeAttribute("src");
-      setPosition(0);
+      setPosition(resumeAt);
       setDuration(t.duration);
       retried.current = isRetry;
 
@@ -196,7 +199,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       }
       playingTrack.current = track;
 
-      const src = api.streamUrl(track.url!);
+      const src = await api.streamUrl(track.url!);
       let HlsEngine: Awaited<ReturnType<typeof loadHls>> | null = null;
       if (track.url!.includes(".m3u8")) {
         setBuffering(true);
@@ -220,6 +223,26 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       } else {
         el.src = src;
       }
+      if (resumeAt > 0) {
+        let restored = false;
+        const restorePosition = () => {
+          if (restored || seq !== loadSeq.current) return;
+          if (el.readyState < 1) return;
+          const target = Math.min(resumeAt, Number.isFinite(el.duration) ? el.duration : resumeAt);
+          try {
+            el.currentTime = target;
+            setPosition(target);
+            restored = true;
+          } catch { /* metadata may not be seekable yet */ }
+        };
+        el.addEventListener("loadedmetadata", restorePosition, { once: true });
+        el.addEventListener("canplay", restorePosition, { once: true });
+        // Cached WebView2 responses may already have metadata before the events above are attached.
+        restorePosition();
+        window.setTimeout(restorePosition, 0);
+        window.setTimeout(restorePosition, 150);
+        window.setTimeout(restorePosition, 500);
+      }
       if (autoplay) {
         attachEq(el);
         resumeEq();
@@ -230,6 +253,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
           const kind = hls.current ? "hls" : "mp3";
           const err = el.error ? `media ${el.error.code}` : `net ${el.networkState}, ready ${el.readyState}`;
           setBuffering(false);
+          hls.current?.destroy();
+          hls.current = null;
+          el.pause();
+          el.removeAttribute("src");
+          el.load();
           toast("Не удалось загрузить трек: {e}", { e: `${kind}, ${err}` });
         }, 20000);
       }
@@ -282,7 +310,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       ["waiting", () => setBuffering(true)],
       ["playing", () => setBuffering(false)],
       ["canplay", () => setBuffering(false)],
-      ["timeupdate", () => setPosition(el.currentTime)],
       ["durationchange", () => isFinite(el.duration) && setDuration(el.duration)],
       [
         "ended",
@@ -298,13 +325,23 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         "error",
         () => {
           if (hls.current || !el.getAttribute("src") || !playingTrack.current) return;
-          if (!retried.current) load(playingTrack.current, true, true); // ссылка протухла — пробуем свежую
+          const recentSeek = Date.now() - lastSeekAtRef.current < 3000;
+          const resumeAt = recentSeek ? seekTargetRef.current : 0;
+          if (!retried.current) load(playingTrack.current, true, true, resumeAt); // ссылка протухла — обновляем её и восстанавливаем seek
           else altRef.current(playingTrack.current, true, `media ${el.error?.code ?? "?"}`);
         },
       ],
     ];
     handlers.forEach(([e, f]) => on(e, f));
-    return () => handlers.forEach(([e, f]) => el.removeEventListener(e, f));
+    const posInterval = setInterval(() => {
+      if (seekingRef.current && Date.now() - lastSeekAtRef.current < 2000) return;
+      seekingRef.current = false;
+      setPosition(el.currentTime);
+    }, 200);
+    return () => {
+      handlers.forEach(([e, f]) => el.removeEventListener(e, f));
+      clearInterval(posInterval);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [next, toast, load]);
 
@@ -433,8 +470,18 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     next,
     prev,
     seek: (s) => {
-      audio.current.currentTime = s;
-      setPosition(s);
+      const target = Math.max(0, Math.min(Number.isFinite(s) ? s : 0, duration || s));
+      seekingRef.current = true;
+      seekTargetRef.current = target;
+      lastSeekAtRef.current = Date.now();
+      if (seekingTimeoutRef.current) clearTimeout(seekingTimeoutRef.current);
+      seekingTimeoutRef.current = setTimeout(() => { seekingRef.current = false; }, 2000);
+      setPosition(target);
+      try {
+        audio.current.currentTime = target;
+      } catch {
+        seekingRef.current = false;
+      }
     },
     setVolume: setVolumeState,
     toggleShuffle: () => {

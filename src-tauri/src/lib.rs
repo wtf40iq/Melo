@@ -250,7 +250,7 @@ fn save_session(app: &AppHandle, s: Option<&Session>) {
     if s.is_some() {
         SESSION_EXPIRED.store(false, std::sync::atomic::Ordering::Relaxed);
     }
-    if s.map(|s| s.client == "kate").unwrap_or(false) {
+    if s.is_some() {
         let _ = fs::write(site_login_mark(), b"1");
     }
     let mut acc = load_accounts(app);
@@ -266,9 +266,7 @@ fn save_session(app: &AppHandle, s: Option<&Session>) {
             acc.accounts.push(s);
         }
         None => {
-            if let Some(id) = acc.active.take() {
-                acc.accounts.retain(|a| a.user_id != id);
-            }
+            acc.active = None;
         }
     }
     store_accounts(app, &acc);
@@ -672,10 +670,6 @@ async fn vk_call(
         form.push(("lang".into(), "ru".into()));
     }
 
-    // Ключ уже умер — не дёргаем ВК: ждём, пока человек продлит вход (окно с QR в приложении)
-    if SESSION_EXPIRED.load(std::sync::atomic::Ordering::Relaxed) {
-        return Err("session_expired".into());
-    }
     // Ключ с ограниченным сроком (QR, пароль) скоро истечёт — заранее и тихо продлеваем,
     // чтобы сессия не оборвалась посреди прослушивания
     let expiring = state.session.lock().unwrap().as_ref().and_then(|s| s.expires_at).map(|e| e - now_secs() < 600).unwrap_or(false);
@@ -764,7 +758,6 @@ static RELOGIN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static LAST_RELOGIN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 async fn relogin_once(app: &AppHandle, state: &AppState, old_token: &str, urgent: bool) -> Option<Session> {
-    let _g = RELOGIN.lock().await;
     let cur = state.session.lock().unwrap().clone()?;
     if cur.token != old_token {
         return Some(cur); // ключ уже обновил параллельный запрос
@@ -897,7 +890,7 @@ async fn vk_browser_login(app: AppHandle, state: State<'_, AppState>) -> Result<
         let mut cb = arboard::Clipboard::new().ok();
         let initial = cb.as_mut().and_then(|c| c.get_text().ok());
         let started = std::time::Instant::now();
-        while tx_clip.lock().unwrap().is_some() && started.elapsed() < Duration::from_secs(900) {
+        while tx_clip.lock().unwrap().is_some() && started.elapsed() < Duration::from_secs(120) {
             std::thread::sleep(Duration::from_millis(500));
             if cb.is_none() {
                 cb = arboard::Clipboard::new().ok();
@@ -1395,9 +1388,9 @@ async fn vk_direct_login(
     }
     let res: Value = state
         .http
-        .get("https://oauth.vk.com/token")
+        .post("https://oauth.vk.com/token")
         .header("User-Agent", VKA_UA)
-        .query(&q)
+        .form(&q)
         .send()
         .await
         .map_err(|_| "Нет соединения с ВКонтакте".to_string())?
@@ -1868,16 +1861,23 @@ fn serve_stream(req: tiny_http::Request, client: &reqwest::blocking::Client, app
         .as_ref()
         .map(|s| s.user_agent())
         .unwrap_or(KATE_UA);
+    let range = req
+        .headers()
+        .iter()
+        .find(|h| h.field.equiv("Range"))
+        .map(|h| h.value.as_str().to_string());
     let mut up = client.get(target.clone()).header("User-Agent", ua);
-    if let Some(r) = req.headers().iter().find(|h| h.field.equiv("Range")) {
-        up = up.header("Range", r.value.as_str());
+    if let Some(r) = &range {
+        up = up.header("Range", r);
     }
     let Ok(res) = up.send() else {
         return fail(req, 502);
     };
     let status = res.status().as_u16();
-    let get = |k: &str| res.headers().get(k).and_then(|v| v.to_str().ok()).map(str::to_string);
-    let ctype = get("content-type").unwrap_or_else(|| "application/octet-stream".into());
+    let content_type = res.headers().get("content-type").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let content_range = res.headers().get("content-range").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let accept_ranges = res.headers().get("accept-ranges").and_then(|v| v.to_str().ok()).map(str::to_string);
+    let ctype = content_type.unwrap_or_else(|| "application/octet-stream".into());
     let is_playlist = target.path().ends_with(".m3u8") || ctype.contains("mpegurl");
 
     let mut headers: Vec<tiny_http::Header> = cors.iter().flatten().cloned().collect();
@@ -1892,11 +1892,48 @@ fn serve_stream(req: tiny_http::Request, client: &reqwest::blocking::Client, app
         let _ = req.respond(r);
         return;
     }
-    headers.extend(hdr("Content-Type", &ctype));
-    for k in ["content-range", "accept-ranges"] {
-        if let Some(v) = get(k) {
-            headers.extend(hdr(k, &v));
+    // Some VK/CDN endpoints ignore Range and answer 200 with the whole file.
+    // Normalize that response to a real 206 so WebView2 can seek reliably.
+    if status == 200 {
+        if let Some(range) = range.as_deref() {
+            let bytes = res.bytes().unwrap_or_default();
+            let valid = range
+                .strip_prefix("bytes=")
+                .and_then(|v| v.split(',').next())
+                .and_then(|spec| {
+                    let mut parts = spec.splitn(2, '-');
+                    let start = parts.next()?.trim().parse::<usize>().ok()?;
+                    let end = parts.next().and_then(|v| {
+                        let v = v.trim();
+                        if v.is_empty() { None } else { v.parse::<usize>().ok() }
+                    });
+                    if start >= bytes.len() { return None; }
+                    let last = end.unwrap_or(bytes.len() - 1).min(bytes.len() - 1);
+                    (last >= start).then_some((start, last))
+                });
+            if let Some((start, last)) = valid {
+                let body = bytes.slice(start..=last).to_vec();
+                headers.extend(hdr("Accept-Ranges", "bytes"));
+                headers.extend(hdr("Content-Range", &format!("bytes {start}-{last}/{}", bytes.len())));
+                headers.extend(hdr("Content-Length", &body.len().to_string()));
+                let mut response = tiny_http::Response::from_data(body).with_status_code(206);
+                for h in headers {
+                    response.add_header(h);
+                }
+                let _ = req.respond(response);
+            } else {
+                fail(req, 416);
+            }
+            return;
         }
+    }
+
+    headers.extend(hdr("Content-Type", &ctype));
+    if let Some(v) = content_range {
+        headers.extend(hdr("content-range", &v));
+    }
+    if let Some(v) = accept_ranges {
+        headers.extend(hdr("accept-ranges", &v));
     }
     let len = res.content_length().map(|l| l as usize);
     let r = tiny_http::Response::new(tiny_http::StatusCode(status), headers, res, len, None);
@@ -2131,7 +2168,17 @@ struct UpdateInfo {
 }
 
 fn parse_ver(v: &str) -> Vec<u64> {
-    v.trim_start_matches(['v', 'V']).split(['.', '-']).take(3).map(|p| p.parse().unwrap_or(0)).collect()
+    let v = v.trim_start_matches(['v', 'V']);
+    let is_prerelease = v.contains('-');
+    let nums: Vec<u64> = v
+        .split('.')
+        .take(3)
+        .map(|p| p.split(['-', '+']).next().unwrap_or(p).parse().unwrap_or(0))
+        .collect();
+    // prerelease версии сортируются ниже релиза (1.0.0-rc1 < 1.0.0)
+    let mut result = nums;
+    result.push(if is_prerelease { 0 } else { 1 });
+    result
 }
 
 /// Лучший релиз из ответа GitHub API: самая новая версия, у которой уже загружен Melo.exe

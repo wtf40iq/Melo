@@ -90,7 +90,7 @@ export interface MusicApi {
   detach(): Promise<void>;
   info(): Promise<AppInfo>;
   /** Превращает адрес трека в то, что можно отдать плееру. */
-  streamUrl(url: string): string;
+  streamUrl(url: string): Promise<string>;
 }
 
 export type DirectLoginParams = { login: string; password: string; code?: string; sms?: boolean; captchaSid?: string; captchaKey?: string };

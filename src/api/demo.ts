@@ -140,5 +140,5 @@ export const demoApi: MusicApi = {
   removeAccount: () => wait(undefined),
   detach: () => wait(undefined),
   info: () => wait({ version: "demo", data_dir: "—", stream: "—", client: "demo", api_version: "5.131" }),
-  streamUrl: (u) => u,
+  streamUrl: async (u) => u,
 };
