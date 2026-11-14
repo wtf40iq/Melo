@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createQR } from "@vkontakte/vk-qr";
 import { Clock, Loader2, RefreshCw, Smartphone, X } from "lucide-react";
 import { api, inTauri } from "../api";
@@ -32,27 +32,40 @@ export function RenewSession() {
   const t = useT();
   const [info, setInfo] = useState<SessionInfo | null>(null);
   const [open, setOpen] = useState(false);
-  const [dismissed, setDismissed] = useState(false);
+  // Отказ от окна не должен пересоздавать интервал и подписку на событие
+  const dismissed = useRef(false);
   const [now, setNow] = useState(Date.now() / 1000);
 
   const refresh = useCallback(() => {
     if (!inTauri) return;
     sessionInfo().then((i) => {
       setInfo(i);
-      if (i.expired) setOpen((o) => o || !dismissed);
+      if (i.expired) setOpen((o) => o || !dismissed.current);
     }).catch(() => {});
-  }, [dismissed]);
+  }, []);
+
+  // После выхода или смены аккаунта окно продления не должно оставаться открытым
+  // от прошлой сессии: иначе сразу после успешного входа снова показывается старый QR.
+  useLayoutEffect(() => {
+    setOpen(false);
+    dismissed.current = false;
+    setInfo(null);
+    if (lib.profile) refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lib.profile?.id, refresh]);
 
   useEffect(() => {
     refresh();
     const id = setInterval(() => { setNow(Date.now() / 1000); refresh(); }, 30_000);
     let off: (() => void) | undefined;
+    let disposed = false;
     if (inTauri) {
       import("@tauri-apps/api/event").then(({ listen }) =>
-        listen("vk-session-expired", () => { setDismissed(false); setOpen(true); refresh(); }).then((u) => (off = u)),
+        listen("vk-session-expired", () => { dismissed.current = false; setOpen(true); refresh(); })
+          .then((u) => { if (disposed) u(); else off = u; }),
       );
     }
-    return () => { clearInterval(id); off?.(); };
+    return () => { disposed = true; clearInterval(id); off?.(); };
   }, [refresh]);
 
   if (!lib.profile || !info) return null;
@@ -70,16 +83,25 @@ export function RenewSession() {
       {open && (
         <RenewDialog
           expired={info.expired}
-          onClose={() => { setOpen(false); setDismissed(true); }}
+          onClose={() => { setOpen(false); dismissed.current = true; }}
           onDone={async (uid) => {
             setOpen(false);
-            setDismissed(false);
+            dismissed.current = false;
             refresh();
-            if (uid !== lib.profile?.id) {
+            if (uid == null) {
+              ui.toast(t("Не удалось продлить вход — попробуйте ещё раз"));
+              return;
+            }
+            const same = uid === lib.profile?.id;
+            try {
+              // Даже для того же аккаунта профиль перезагружаем заново: это обновляет
+              // me в API-слое и запускает перезагрузку треков/плейлистов.
               await lib.finishLogin();
-            } else {
-              ui.toast(t("Вход продлён"));
-              lib.reloadPlaylists?.();
+              if (same) ui.toast(t("Вход продлён"));
+            } catch (e) {
+              ui.toast(errorText(e));
+              // Сессия могла обновиться, даже если загрузка профиля моргнула.
+              lib.reloadLibrary();
             }
           }}
         />
@@ -156,7 +178,7 @@ function RenewDialog({ expired, onClose, onDone }: { expired: boolean; onClose: 
 
   return (
     <div className="upd-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="upd-card renew-card" role="dialog" aria-label={t("Продлите вход ВКонтакте")}>
+      <div className="upd-card renew-card" role="dialog" aria-modal="true" aria-label={t("Продлите вход ВКонтакте")}>
         <button className="icon-btn sm upd-close" onClick={onClose} aria-label={t("Закрыть")}><X size={16} /></button>
         <h3>{expired ? t("Продлите вход ВКонтакте") : t("Вход в ВК скоро закончится")}</h3>
         <p className="muted">
@@ -164,7 +186,7 @@ function RenewDialog({ expired, onClose, onDone }: { expired: boolean; onClose: 
         </p>
         <div className="renew-qr">
           {code && phase !== "loading" && phase !== "error" ? (
-            <div className="qr-box" dangerouslySetInnerHTML={{ __html: createQR(code.url, { qrSize: 200, isShowLogo: true, foregroundColor: "#ffffff" }) }} />
+            <div className="qr" dangerouslySetInnerHTML={{ __html: createQR(code.url, { qrSize: 220, isShowLogo: true, foregroundColor: "#000000" }) }} />
           ) : phase === "error" ? (
             <div className="renew-err">{error || t("Не удалось получить QR-код")}</div>
           ) : (

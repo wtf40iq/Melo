@@ -111,8 +111,8 @@ function sprites(p: Pal): Sprites {
 }
 
 // ---------- что под курсором ----------
-const TEXT_SEL = 'input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="button"]):not([type="submit"]), textarea, [contenteditable=""], [contenteditable="true"]';
-const CLICK_SEL = 'button:not(:disabled), a[href], [role="button"], [role="tab"], [role="menuitem"], [role="option"], [role="slider"], input[type="range"], input[type="checkbox"], input[type="radio"], input[type="color"], select, summary, label.swatch, .card, .tl-row, .chip, .swatch';
+const TEXT_SEL = 'input:not([type="range"]):not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]), textarea, [contenteditable=""], [contenteditable="true"]';
+const CLICK_SEL = 'button:not(:disabled), a[href], [role="button"], [role="tab"], [role="menuitem"], [role="option"], [role="slider"], input[type="range"], input[type="checkbox"], input[type="radio"], select, summary, label.swatch, .card, .tl-row, .chip, .swatch';
 type Hover = "none" | "click" | "text";
 function hoverOf(el: Element | null): Hover {
   if (!el || !(el instanceof Element)) return "none";
@@ -139,7 +139,7 @@ export function FireCursor() {
   const own = style !== "system";
   const on = own || s.clickWave;
   const skinEl = useRef<HTMLDivElement>(null);
-  const sk = useRef<SkinRefs>({ heat: null, heat2: null, chrome: null, chromeShine: null, shocks: [], shockMaps: [], shockMaps2: [], shockImgs: [] });
+  const sk = useRef<SkinRefs>({ heat: null, heat2: null, chrome: null, chromeShine: null, shocks: [], shockMaps: [], shockImgs: [] });
   const S = 1.45 * s.fireSize;
   const material = s.cursorMaterial;
   const blast = s.clickWave && s.waveStyle === "blast";
@@ -168,7 +168,6 @@ export function FireCursor() {
     const skin = skinEl.current;
     const shockEls = [...sk.current.shocks];
     const shockMaps = [...sk.current.shockMaps];
-    const shockMaps2 = [...sk.current.shockMaps2];
     const resetShock = (slot: number) => {
       clearTimeout(shockExpiry[slot]);
       const el = shockEls[slot];
@@ -179,7 +178,6 @@ export function FireCursor() {
         el.style.width = el.style.height = "0px";
       }
       shockMaps[slot]?.setAttribute("scale", "0");
-      shockMaps2[slot]?.setAttribute("scale", "0");
     };
     const clearRenderer = () => {
       ctx.resetTransform();
@@ -393,7 +391,7 @@ export function FireCursor() {
       return true;
     };
 
-    const drawWaves = (dt: number) => {
+    const drawWaves = () => {
       const R = 62 * s.waveSize;
       for (let i = ws.length - 1; i >= 0; i--) {
         const w = ws[i];
@@ -627,7 +625,7 @@ export function FireCursor() {
       ctx.globalCompositeOperation = "lighter";
       if (style === "fire") drawFire(dt);
       else if (style === "bloom") drawBloom(dt, now);
-      drawWaves(dt);
+      drawWaves();
       canvasDirty = canvasUsed;
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = "source-over";

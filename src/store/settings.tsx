@@ -1,4 +1,4 @@
-import { createContext, ReactNode, useContext, useEffect, useState, useMemo, useCallback } from "react";
+import { createContext, ReactNode, useContext, useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { Lang, translate, tracksLabel } from "../i18n";
 import { EQ_PRESETS } from "./eq";
 
@@ -11,10 +11,13 @@ export const ACCENTS = ["#5E9FE8", "#8B7CF6", "#E36FA8", "#E97366", "#DE9255", "
 
 type Settings = {
   lang: Lang;
+  theme: "dark" | "oled";
   accent: string;
   eqEnabled: boolean;
   eqPreset: string;
   eqGains: number[];
+  /** Пользовательские пресеты эквалайзера */
+  eqSaved: { name: string; gains: number[] }[];
   normalize: boolean;
   /** Пропускать треки, которые нельзя послушать */
   skipUnavailable: boolean;
@@ -22,10 +25,14 @@ type Settings = {
   resume: boolean;
   /** Плавная пауза и старт */
   fade: boolean;
+  /** Короткое затухание при смене трека */
+  smoothTracks: boolean;
   speed: number;
   /** Предел громкости: сколько даёт ползунок громкости на 100%, 0.05–1 */
   volumeMax: number;
   closeToTray: boolean;
+  /** Вид мини-плеера */
+  miniStyle: "full" | "compact";
   animations: "full" | "reduced" | "off";
   compact: boolean;
   sideCover: boolean;
@@ -74,6 +81,14 @@ type Settings = {
   scale: number;
   /** Проверять обновления на GitHub */
   autoUpdate: boolean;
+  /** Показывать трек в Discord */
+  discordRpc: boolean;
+  /** Глобальные горячие клавиши */
+  globalHotkeys: boolean;
+  hotkeyPlay: string;
+  hotkeyNext: string;
+  hotkeyPrev: string;
+  hotkeyLike: string;
   /** Плавная прокрутка колесиком */
   smoothScroll: boolean;
   /** Версия формата — для переноса старых настроек */
@@ -82,17 +97,21 @@ type Settings = {
 
 const defaults: Settings = {
   lang: navigator.language?.startsWith("ru") ? "ru" : "en",
+  theme: "dark",
   accent: ACCENTS[0],
   eqEnabled: false,
   eqPreset: "Обычный",
   eqGains: EQ_PRESETS["Обычный"],
+  eqSaved: [],
   normalize: false,
   skipUnavailable: true,
   resume: true,
   fade: true,
+  smoothTracks: true,
   speed: 1,
   volumeMax: 1,
   closeToTray: false,
+  miniStyle: "full",
   animations: "full",
   compact: false,
   sideCover: false,
@@ -122,6 +141,12 @@ const defaults: Settings = {
   scale: 1,
   smoothScroll: true,
   autoUpdate: true,
+  discordRpc: false,
+  globalHotkeys: false,
+  hotkeyPlay: "CommandOrControl+Alt+Space",
+  hotkeyNext: "CommandOrControl+Alt+ArrowRight",
+  hotkeyPrev: "CommandOrControl+Alt+ArrowLeft",
+  hotkeyLike: "CommandOrControl+Alt+L",
   v: 4,
 };
 
@@ -150,6 +175,8 @@ const load = (): Settings => {
       delete saved.fireCursor;
     }
     saved.waveSize = Math.max(0.2, Math.min(3, Number(saved.waveSize) || 1));
+    if (saved.theme !== "oled") saved.theme = "dark";
+    if (saved.miniStyle !== "compact") saved.miniStyle = "full";
     return { ...defaults, ...saved, v: 4 };
   } catch {
     return defaults;
@@ -158,8 +185,20 @@ const load = (): Settings => {
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [s, setS] = useState<Settings>(load);
+  const latest = useRef(s);
+  latest.current = s;
+  const write = (value: Settings) => {
+    // Переполнение хранилища не должно ронять приложение
+    try { localStorage.setItem("melo.settings", JSON.stringify(value)); } catch { /* ignore */ }
+  };
 
-  useEffect(() => localStorage.setItem("melo.settings", JSON.stringify(s)), [s]);
+  useEffect(() => {
+    // Ползунки меняют состояние десятки раз в секунду — пишем не на каждое движение,
+    // а когда пользователь остановился.
+    const id = setTimeout(() => write(latest.current), 150);
+    return () => clearTimeout(id);
+  }, [s]);
+  useEffect(() => () => write(latest.current), []);
   useEffect(() => {
     // Сам акцентный цвет ставит компонент Effects (он умеет брать цвет из обложки)
     document.documentElement.lang = s.lang;

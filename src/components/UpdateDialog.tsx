@@ -2,7 +2,7 @@ import { Download, Loader2, X } from "lucide-react";
 import { snoozeUpdate, useUpdate } from "../store/update";
 import { useT } from "../store/settings";
 
-const mb = (n: number) => `${(n / 1048576).toFixed(1)} МБ`;
+const mb = (n: number, unit: string) => `${(n / 1048576).toFixed(1)} ${unit}`;
 
 /** Окно «Доступна новая версия». */
 export function UpdateDialog() {
@@ -16,7 +16,7 @@ export function UpdateDialog() {
   };
   return (
     <div className="upd-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !downloading && u.setOpen(false)}>
-      <div className="upd-card" role="dialog" aria-label={t("Доступно обновление")}>
+      <div className="upd-card" role="dialog" aria-modal="true" aria-label={t("Доступно обновление")}>
         {!downloading && (
           <button className="icon-btn sm upd-close" onClick={later} aria-label={t("Закрыть")}><X size={16} /></button>
         )}
@@ -27,7 +27,7 @@ export function UpdateDialog() {
         {downloading ? (
           <div className="upd-progress">
             <div className="upd-bar"><i style={{ width: `${Math.round(u.progress * 100)}%` }} /></div>
-            <small>{t("Скачивание…")} {Math.round(u.progress * 100)}%{u.info.size ? ` · ${mb(u.info.size)}` : ""}</small>
+            <small>{t("Скачивание…")} {Math.round(u.progress * 100)}%{u.info.size ? ` · ${mb(u.info.size, t("МБ"))}` : ""}</small>
           </div>
         ) : (
           <>

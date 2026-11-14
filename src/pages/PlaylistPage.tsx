@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from "react";
-import { MoreHorizontal, Pencil, Play, Shuffle, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { FileDown, MoreHorizontal, Pencil, Play, Search, Shuffle, Trash2, X } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { inTauri } from "../api";
 import { api } from "../api";
 import { Cover } from "../components/Cover";
 import { TrackList } from "../components/TrackList";
@@ -19,6 +21,7 @@ export function PlaylistPage({ playlist }: { playlist: Playlist }) {
   const { t, tracks: tl } = useSettings();
   const { data, loading } = useAsync(() => api.playlistTracks(playlist), [playlist.id]);
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [filter, setFilter] = useState("");
   useEffect(() => setTracks(data ?? []), [data]);
   const [menu, setMenu] = useState(false);
   const [dialog, setDialog] = useState<"delete" | "rename" | null>(null);
@@ -27,6 +30,18 @@ export function PlaylistPage({ playlist }: { playlist: Playlist }) {
   const pl = lib.playlists.find((x) => x.id === playlist.id) ?? playlist;
   const editable = !!pl.editable;
   const total = tracks.reduce((s, x) => s + x.duration, 0);
+  const shownTracks = useMemo(() => {
+    const f = filter.trim().toLowerCase();
+    return f ? tracks.filter((x) => `${x.artist} ${x.title}`.toLowerCase().includes(f)) : tracks;
+  }, [tracks, filter]);
+
+  // Если ВК отдал не все страницы, лучше сказать об этом, чем молча показать часть.
+  useEffect(() => {
+    if (!loading && data && pl.count > 0 && data.length < pl.count) {
+      ui.toast(t("Загрузилась только часть плейлиста — проверьте соединение"));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, data, pl.count]);
 
   useEffect(() => {
     if (!menu) return;
@@ -34,6 +49,17 @@ export function PlaylistPage({ playlist }: { playlist: Playlist }) {
     const id = setTimeout(() => window.addEventListener("mousedown", close));
     return () => { clearTimeout(id); window.removeEventListener("mousedown", close); };
   }, [menu]);
+
+  const exportM3u = async () => {
+    if (!inTauri) return;
+    const NL = String.fromCharCode(10);
+    const lines = ["#EXTM3U", ...tracks.map((tr) => `#EXTINF:${tr.duration},${tr.artist} - ${tr.title}${NL}https://vk.com/audio${tr.ownerId}_${tr.audioId}`)];
+    try {
+      if (await invoke<boolean>("save_text_file", { defaultName: `${pl.title}.m3u`, content: lines.join(NL) })) ui.toast(t("Экспортировано"));
+    } catch (e) {
+      ui.toast(errorText(e));
+    }
+  };
 
   const removeTrack = async (tr: Track, i: number) => {
     setTracks((list) => list.filter((_, k) => k !== i));
@@ -73,6 +99,7 @@ export function PlaylistPage({ playlist }: { playlist: Playlist }) {
                 {menu && (
                   <div className="menu pl-menu" role="menu">
                     <button onClick={() => { setMenu(false); setDialog("rename"); }}><Pencil size={16} /> {t("Переименовать")}</button>
+                    <button onClick={() => { setMenu(false); void exportM3u(); }}><FileDown size={16} /> {t("Экспорт M3U")}</button>
                     <button className="danger" onClick={() => { setMenu(false); setDialog("delete"); }}><Trash2 size={16} /> {t("Удалить плейлист")}</button>
                   </div>
                 )}
@@ -81,8 +108,15 @@ export function PlaylistPage({ playlist }: { playlist: Playlist }) {
           </div>
         </div>
       </div>
-      {editable && tracks.length > 0 && <small className="faint lib-hint">{t("Чтобы убрать трек из плейлиста — нажмите «⋯» у трека или правую кнопку мыши")}</small>}
-      {loading ? <Loading /> : tracks.length ? <TrackList tracks={tracks} onRemove={editable ? removeTrack : undefined} /> : <Empty title={t("В плейлисте нет треков")} />}
+      {tracks.length > 4 && (
+        <label className="filter pl-filter">
+          <Search size={15} />
+          <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder={t("Найти в плейлисте")} />
+          {filter && <button className="search-clear" onClick={() => setFilter("")} aria-label={t("Очистить")}><X size={13} /></button>}
+        </label>
+      )}
+      {editable && tracks.length > 0 && !filter && <small className="faint lib-hint">{t("Чтобы убрать трек из плейлиста — нажмите «⋯» у трека или правую кнопку мыши")}</small>}
+      {loading ? <Loading /> : shownTracks.length ? <TrackList tracks={shownTracks} onRemove={editable && !filter ? removeTrack : undefined} /> : <Empty title={t(filter ? "Ничего не нашлось" : "В плейлисте нет треков")} />}
 
       {dialog === "delete" && (
         <Dialog

@@ -37,7 +37,7 @@ function useBeat(ref: React.RefObject<HTMLElement | null>, on: boolean) {
         beat = hit > beat ? beat + (hit - beat) * 0.6 : beat * 0.9;
         el.style.setProperty("--beat", Math.min(1, beat).toFixed(3));
       }
-    });
+    }, 30);
     el.classList.add("beat");
     return () => {
       stop();

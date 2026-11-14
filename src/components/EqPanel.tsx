@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { RotateCcw, Settings2, X } from "lucide-react";
+import { RotateCcw, Save, Settings2, X } from "lucide-react";
 import { EQ_BANDS, EQ_PRESETS } from "../store/eq";
 import { useSettings } from "../store/settings";
 import { useUi } from "../store/ui";
@@ -18,10 +18,24 @@ function Switch({ checked, onChange, label }: { checked: boolean; onChange: (v: 
 export function EqEditor({ compact }: { compact?: boolean }) {
   const s = useSettings();
   const t = s.t;
+  const [name, setName] = useState("");
+  const saved = s.eqSaved ?? [];
   const setBand = (i: number, v: number) => {
     const g = [...s.eqGains];
     g[i] = v;
     s.set({ eqGains: g, eqPreset: "custom", eqEnabled: true });
+  };
+  const savePreset = () => {
+    const n = name.trim();
+    if (!n || EQ_PRESETS[n]) return;
+    s.set({ eqSaved: [...saved.filter((p) => p.name !== n), { name: n, gains: [...s.eqGains] }], eqPreset: n, eqEnabled: true });
+    setName("");
+  };
+  const removePreset = (n: string) => {
+    s.set({
+      eqSaved: saved.filter((p) => p.name !== n),
+      ...(s.eqPreset === n ? { eqPreset: "Обычный", eqGains: EQ_PRESETS["Обычный"] } : {}),
+    });
   };
   return (
     <div className={`eq-panel ${s.eqEnabled ? "" : "off"} ${compact ? "compact" : ""}`}>
@@ -36,6 +50,29 @@ export function EqEditor({ compact }: { compact?: boolean }) {
           </button>
         ))}
         {s.eqPreset === "custom" && <span className="chip active static">{t("Своя настройка")}</span>}
+      </div>
+      {saved.length > 0 && (
+        <div className="chips eq-saved-chips">
+          {saved.map((p) => (
+            <span key={p.name} className={`chip-wrap ${s.eqPreset === p.name ? "active" : ""}`}>
+              <button className="chip-link" onClick={() => s.set({ eqPreset: p.name, eqGains: [...p.gains], eqEnabled: true })}>{p.name}</button>
+              <button className="chip-del" onClick={() => removePreset(p.name)} aria-label={t("Удалить пресет")}><X size={11} /></button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="eq-save">
+        <input
+          className="dialog-input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") savePreset(); }}
+          placeholder={t("Название пресета")}
+          maxLength={28}
+        />
+        <button className="btn secondary sm-btn" disabled={!name.trim()} onClick={savePreset}>
+          <Save size={14} /> {t("Сохранить пресет")}
+        </button>
       </div>
       <div className="eq-bands">
         {EQ_BANDS.map((f, i) => (

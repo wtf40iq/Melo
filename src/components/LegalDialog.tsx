@@ -3,10 +3,12 @@ import { useEffect, useState } from "react";
 import { FileText, ShieldCheck, X } from "lucide-react";
 import { legal } from "../legal";
 import { useSettings } from "../store/settings";
+import { useFocusTrap } from "../useFocusTrap";
 
 /** Окно с соглашением и политикой конфиденциальности. */
 export function LegalDialog({ doc, onClose }: { doc: "terms" | "privacy"; onClose: () => void }) {
   const s = useSettings();
+  const trap = useFocusTrap<HTMLDivElement>();
   const [tab, setTab] = useState(doc);
   const docs = legal(s.lang);
   const d = docs[tab];
@@ -17,7 +19,7 @@ export function LegalDialog({ doc, onClose }: { doc: "terms" | "privacy"; onClos
   }, [onClose]);
   return createPortal(
     <div className="upd-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="upd-card legal-card" role="dialog" aria-label={d.title}>
+      <div ref={trap} tabIndex={-1} className="upd-card legal-card" role="dialog" aria-modal="true" aria-label={d.title}>
         <button className="icon-btn sm upd-close" onClick={onClose} aria-label={s.t("Закрыть")}><X size={16} /></button>
         <div className="segmented legal-tabs">
           <button className={tab === "terms" ? "active" : ""} onClick={() => setTab("terms")}><FileText size={14} /> {docs.terms.title}</button>

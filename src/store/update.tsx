@@ -70,10 +70,15 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
 
   const install = useCallback(async () => {
     if (!info?.available) return;
+    if (!info.digest) {
+      setError("В релизе нет контрольной суммы — обновление отменено");
+      setStatus("error");
+      return;
+    }
     setStatus("downloading");
     setProgress(0);
     try {
-      await invoke("update_install", { url: info.url, digest: info.digest ?? null });
+      await invoke("update_install", { url: info.url, digest: info.digest });
     } catch (e) {
       setError(String(e));
       setStatus("error");
@@ -83,13 +88,14 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!inTauri) return;
     let off: (() => void) | undefined;
+    let disposed = false;
     import("@tauri-apps/api/event").then(({ listen }) =>
       listen<[number, number]>("update-progress", (e) => {
         const [done, total] = e.payload;
         setProgress(total ? done / total : 0);
-      }).then((u) => (off = u)),
+      }).then((u) => { if (disposed) u(); else off = u; }),
     );
-    return () => off?.();
+    return () => { disposed = true; off?.(); };
   }, []);
 
   // Тихая проверка: вскоре после запуска, потом каждый час. Если не получилось (нет сети,
@@ -98,7 +104,9 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!inTauri || !s.autoUpdate) return;
     let timer = 0;
+    let alive = true;
     const plan = () => {
+      if (!alive) return;
       clearTimeout(timer);
       const retry = [2, 5, 15, 30][Math.min(fails.current, 3)] * 60_000;
       timer = window.setTimeout(run, fails.current ? retry : 60 * 60_000);
@@ -111,6 +119,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
     window.addEventListener("focus", stale);
     document.addEventListener("visibilitychange", vis);
     return () => {
+      alive = false;
       clearTimeout(timer);
       window.removeEventListener("online", run);
       window.removeEventListener("focus", stale);

@@ -1,17 +1,20 @@
 import { memo, useEffect, useState } from "react";
-import { AppWindow, Info, Music2, Palette, UserRound, WandSparkles, type LucideIcon, Check, Copy, FileText, RefreshCw, Sparkles, LogOut, RotateCcw, UserPlus, X } from "lucide-react";
-import { api } from "../api";
+import { AppWindow, Image as ImageIcon, Info, Music2, Palette, UserRound, WandSparkles, type LucideIcon, Check, Copy, FileText, RefreshCw, Sparkles, LogOut, RotateCcw, UserPlus, X } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { api, inTauri } from "../api";
 import { AppInfo } from "../api/types";
 import { useUi } from "../store/ui";
 import { Lang } from "../i18n";
 import { EqEditor } from "../components/EqPanel";
 import { useLibrary } from "../store/library";
-import { ACCENTS, useSettings } from "../store/settings";
+import { ACCENTS, DEFAULT_SETTINGS, useSettings } from "../store/settings";
 import { useUpdate } from "../store/update";
 import { LegalDialog } from "../components/LegalDialog";
 import { Dialog } from "../components/Dialog";
 import { ARROW, MATERIALS } from "../components/CursorSkin";
 import { CURSOR_SWATCHES } from "../components/FireCursor";
+import { ColorPickerButton } from "../components/ColorPicker";
+import type { SessionInfo } from "../components/RenewSession";
 
 function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
   return (
@@ -105,14 +108,50 @@ export const Settings = memo(function Settings() {
   const setTab = (v: TabId) => { setTabState(v); sessionStorage.setItem("melo.setTab", v); document.querySelector(".set-scroll")?.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior }); };
   const t = s.t;
   const [info, setInfo] = useState<AppInfo | null>(null);
+  const [autostart, setAutostart] = useState(false);
+  const [session, setSession] = useState<SessionInfo | null>(null);
+  const refreshSession = () => {
+    if (!inTauri) return;
+    invoke<SessionInfo>("vk_session_info").then(setSession).catch(() => {});
+  };
   useEffect(() => {
     api.info().then(setInfo).catch(() => {});
     lib.reloadAccounts();
+    if (inTauri) invoke<boolean>("autostart_get").then(setAutostart).catch(() => {});
+    refreshSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  const toggleAutostart = async (v: boolean) => {
+    if (!inTauri) return;
+    try {
+      await invoke("autostart_set", { value: v });
+      setAutostart(v);
+    } catch (e) {
+      ui.toast(String(e));
+    }
+  };
   const copy = (text: string) => {
     navigator.clipboard?.writeText(text).catch(() => {});
     ui.toast("Скопировано");
+  };
+  const copySettings = () => copy(JSON.stringify(s, (_, v) => (typeof v === "function" ? undefined : v), 2));
+  const importSettings = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      const data = JSON.parse(text);
+      if (!data || typeof data !== "object") throw new Error("В буфере нет настроек Melo");
+      const patch: Record<string, unknown> = {};
+      for (const k of Object.keys(DEFAULT_SETTINGS)) if (k in data) patch[k] = data[k];
+      if (!Object.keys(patch).length) throw new Error("В буфере нет настроек Melo");
+      s.set(patch);
+      ui.toast(t("Настройки загружены"));
+    } catch (e) {
+      ui.toast(String(e instanceof Error ? e.message : e));
+    }
+  };
+  const copyDiagnostics = async () => {
+    const si = await invoke<SessionInfo>("vk_session_info").catch(() => null);
+    copy(JSON.stringify({ app: info, session: si }, null, 2));
   };
   const cur = TABS.find((x) => x[0] === tab) ?? TABS[0];
   const SectionIcon = cur[3];
@@ -148,6 +187,9 @@ export const Settings = memo(function Settings() {
         </Row>
         <Row title="Плавная пауза" hint="Звук мягко затухает и нарастает при паузе и старте">
           <Toggle checked={s.fade} onChange={(v) => s.set({ fade: v })} label={t("Плавная пауза")} />
+        </Row>
+        <Row title="Плавная смена треков" hint="Короткое затухание перед следующим треком">
+          <Toggle checked={s.smoothTracks} onChange={(v) => s.set({ smoothTracks: v })} label={t("Плавная смена треков")} />
         </Row>
         <Row title="Пропускать недоступные треки" hint="Если ВК не отдаёт трек, сразу включается следующий">
           <Toggle checked={s.skipUnavailable} onChange={(v) => s.set({ skipUnavailable: v })} label={t("Пропускать недоступные треки")} />
@@ -192,17 +234,36 @@ export const Settings = memo(function Settings() {
                 {s.accent.toLowerCase() === c.toLowerCase() && <Check size={15} />}
               </button>
             ))}
-            <label className="swatch custom" title={t("Свой цвет")} style={{ background: ACCENTS.includes(s.accent) ? undefined : s.accent }}>
-              <input type="color" value={s.accent} onChange={(e) => s.set({ accent: e.target.value })} aria-label={t("Свой цвет")} />
-            </label>
+            <ColorPickerButton
+              className="swatch custom"
+              label={t("Свой цвет")}
+              value={s.accent}
+              onChange={(c) => s.set({ accent: c })}
+            >
+              <span className="custom-dot" style={{ background: s.accent }} />
+              {!ACCENTS.includes(s.accent) && <Check size={11} className="custom-check" />}
+            </ColorPickerButton>
           </div>
         </div>
               <Row title="Цвет из обложки" hint="Акцентный цвет подстраивается под обложку играющего трека">
-                <Toggle checked={s.dynamicAccent} onChange={(v) => s.set({ dynamicAccent: v })} label={t("Цвет из обложки")} />
+                <button
+                  className={`accent-cover ${s.dynamicAccent ? "on" : ""}`}
+                  onClick={() => s.set({ dynamicAccent: !s.dynamicAccent })}
+                  role="switch"
+                  aria-checked={s.dynamicAccent}
+                  aria-label={t("Цвет из обложки")}
+                >
+                  <ImageIcon size={15} />
+                  <span>{t("Из обложки")}</span>
+                  <Check size={14} className={`accent-cover-check ${s.dynamicAccent ? "" : "off"}`} />
+                </button>
               </Row>
             </section>
             <section className="set-card">
               <h3>{t("Интерфейс")}</h3>
+        <Row title="Тема">
+          <Seg value={s.theme} onChange={(v) => s.set({ theme: v })} options={[["dark", "Тёмная"], ["oled", "OLED"]]} />
+        </Row>
         <div className="set-row">
           <span>{t("Язык")}</span>
           <div className="segmented">
@@ -270,13 +331,25 @@ export const Settings = memo(function Settings() {
                         {s.fireColor === id && <Check size={15} />}
                       </button>
                     ))}
-                    <button className={`swatch accent-swatch ${s.fireColor === "accent" ? "on" : ""}`} onClick={() => s.set({ fireColor: "accent" })} aria-label={t("Цвет акцента")} data-tip={t(s.dynamicAccent ? "Как акцент — из обложки" : "Как акцент")}>
-                      {s.fireColor === "accent" ? <Check size={15} /> : <span className="accent-dot" />}
+                    <button
+                      className={`swatch accent-swatch ${s.fireColor === "accent" ? "on" : ""}`}
+                      style={{ background: "linear-gradient(135deg, var(--accent), var(--accent-2, var(--accent-3, var(--accent))))" }}
+                      onClick={() => s.set({ fireColor: "accent" })}
+                      aria-label={t(s.dynamicAccent ? "Цвет из обложки" : "Цвет акцента")}
+                      data-tip={t(s.dynamicAccent ? "Цвет из обложки" : "Цвет акцента")}
+                    >
+                      {s.fireColor === "accent" ? <Check size={15} /> : <ImageIcon size={13} />}
                     </button>
-                    <label className={`swatch custom ${s.fireColor === "custom" ? "on" : ""}`} data-tip={t("Свой цвет")} style={{ background: s.fireColor === "custom" ? s.cursorCustom : undefined }}>
-                      <input type="color" value={s.cursorCustom} onChange={(e) => s.set({ cursorCustom: e.target.value, fireColor: "custom" })} onClick={() => s.fireColor !== "custom" && s.set({ fireColor: "custom" })} aria-label={t("Свой цвет")} />
-                      {s.fireColor === "custom" && <Check size={15} />}
-                    </label>
+                    <ColorPickerButton
+                      className={`swatch custom ${s.fireColor === "custom" ? "on" : ""}`}
+                      label={t("Свой цвет")}
+                      value={s.cursorCustom}
+                      onOpen={() => s.set({ fireColor: "custom" })}
+                      onChange={(c) => s.set({ cursorCustom: c, fireColor: "custom" })}
+                    >
+                      <span className="custom-dot" style={{ background: s.cursorCustom }} />
+                      {s.fireColor === "custom" && <Check size={11} className="custom-check" />}
+                    </ColorPickerButton>
                   </div>
                 </div>
                   {s.cursorStyle !== "system" && (
@@ -357,12 +430,39 @@ export const Settings = memo(function Settings() {
         <Row title="Сворачивать в трей при закрытии" hint="Музыка продолжит играть, Melo останется у часов. Выйти — через значок в трее">
           <Toggle checked={s.closeToTray} onChange={(v) => s.set({ closeToTray: v })} label={t("Сворачивать в трей при закрытии")} />
         </Row>
+        <Row title="Запускать вместе с Windows" hint="Melo будет стартовать свёрнутым в трей и сразу будет готов к работе">
+          <Toggle checked={autostart} onChange={toggleAutostart} label={t("Запускать вместе с Windows")} />
+        </Row>
+        <Row title="Вид мини-плеера" hint="Компактный — меньше элементов и ниже окно">
+          <Seg value={s.miniStyle} onChange={(v) => s.set({ miniStyle: v })} options={[["full", "Полный"], ["compact", "Компактный"]]} />
+        </Row>
             </section>
             <section className="set-card">
               <h3>{t("Обновления")}</h3>
         <Row title="Проверять обновления" hint="Melo сам узнаёт о новой версии на GitHub и предлагает обновиться">
           <Toggle checked={s.autoUpdate} onChange={(v) => s.set({ autoUpdate: v })} label={t("Проверять обновления")} />
         </Row>
+        <Row title="Discord Rich Presence" hint="Показывать текущий трек в профиле Discord">
+          <Toggle checked={s.discordRpc} onChange={(v) => s.set({ discordRpc: v })} label={t("Discord Rich Presence")} />
+        </Row>
+        <Row title="Глобальные горячие клавиши" hint="Работают, даже когда Melo свёрнут. Формат: CommandOrControl+Alt+Space">
+          <Toggle checked={s.globalHotkeys} onChange={(v) => s.set({ globalHotkeys: v })} label={t("Глобальные горячие клавиши")} />
+        </Row>
+        {s.globalHotkeys && (
+          <div className="set-sub hotkey-grid">
+            {([
+              ["hotkeyPlay", "Играть / пауза"],
+              ["hotkeyNext", "Следующий трек"],
+              ["hotkeyPrev", "Предыдущий трек"],
+              ["hotkeyLike", "Лайк"],
+            ] as const).map(([key, label]) => (
+              <label key={key} className="hotkey-row">
+                <span>{t(label)}</span>
+                <input className="dialog-input" value={s[key]} onChange={(e) => s.set({ [key]: e.target.value })} spellCheck={false} />
+              </label>
+            ))}
+          </div>
+        )}
         <div className="row-gap upd-row">
           <button className="btn secondary sm-btn" disabled={upd.status === "checking" || upd.status === "downloading"} onClick={() => upd.check(true)}>
             <RefreshCw size={15} className={upd.status === "checking" ? "spin" : ""} /> {t("Проверить обновления")}
@@ -447,6 +547,14 @@ export const Settings = memo(function Settings() {
               <button className="icon-btn sm" onClick={() => copy(info.data_dir)} aria-label={t("Скопировать")}><Copy size={14} /></button>
             )}
           </b>
+          <span>{t("Сессия ВК")}</span><b>{session ? (session.expired ? t("Требует продления") : t("Активна")) : "—"}</b>
+          <span>{t("Вход истекает")}</span><b>{session?.expires_at ? new Date(session.expires_at * 1000).toLocaleString() : "—"}</b>
+        </div>
+        <div className="row-gap settings-tools">
+          <button className="btn secondary sm-btn" onClick={copySettings}><Copy size={15} /> {t("Скопировать настройки")}</button>
+          <button className="btn secondary sm-btn" onClick={() => { void importSettings(); }}><FileText size={15} /> {t("Вставить настройки")}</button>
+          <button className="btn secondary sm-btn" onClick={() => { refreshSession(); }}><RefreshCw size={15} /> {t("Обновить диагностику")}</button>
+          <button className="btn secondary sm-btn" onClick={() => { void copyDiagnostics(); }}><Info size={15} /> {t("Скопировать диагностику")}</button>
         </div>
               <small className="faint">
                 {t("Ключи входа хранятся только на этом компьютере, в папке данных. Melo не собирает статистику и не отправляет ничего, кроме запросов к ВКонтакте.")}

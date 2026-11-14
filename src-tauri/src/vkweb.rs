@@ -8,7 +8,6 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, ORIGIN, REFERER};
 use reqwest_cookie_store::{CookieStore, CookieStoreMutex};
 use serde_json::Value;
 use std::fs;
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,8 +45,9 @@ impl WebClient {
     }
 
     pub fn load(path: &Path) -> Option<Self> {
-        let f = fs::File::open(path).ok()?;
-        let store = cookie_store::serde::json::load_all(BufReader::new(f)).ok()?;
+        let raw = fs::read(path).ok()?;
+        let data = super::unseal(&raw)?;
+        let store = cookie_store::serde::json::load_all(std::io::Cursor::new(data)).ok()?;
         Self::with_store(store).ok()
     }
 
@@ -55,14 +55,17 @@ impl WebClient {
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
-        let tmp = path.with_extension("tmp");
+        // Cookies дают доступ к аккаунту, поэтому на диск они попадают только зашифрованными
+        let mut buf = Vec::new();
         let ok = (|| -> Option<()> {
-            let mut f = fs::File::create(&tmp).ok()?;
             let store = self.jar.lock().ok()?;
-            cookie_store::serde::json::save_incl_expired_and_nonpersistent(&store, &mut f).ok()
+            cookie_store::serde::json::save_incl_expired_and_nonpersistent(&store, &mut buf).ok()
         })();
         if ok.is_some() {
-            let _ = fs::rename(&tmp, path);
+            let tmp = path.with_extension("tmp");
+            if fs::write(&tmp, super::seal(&buf)).is_ok() {
+                let _ = fs::rename(&tmp, path);
+            }
         }
     }
 }
@@ -116,8 +119,19 @@ fn net_err(_: reqwest::Error) -> String {
 }
 
 fn parse_json(text: &str) -> Value {
-    let t = text.trim_start().trim_start_matches("<!--");
-    serde_json::from_str(t).unwrap_or(Value::Null)
+    // ВК иногда отдаёт JSON с HTML-комментарием и хвостом после него.
+    let t = text
+        .trim()
+        .trim_start_matches("<!--")
+        .trim_end_matches("-->")
+        .trim_end_matches(';')
+        .trim();
+    // Разбираем первое JSON-значение и игнорируем возможный хвост.
+    serde_json::Deserializer::from_str(t)
+        .into_iter::<Value>()
+        .next()
+        .and_then(|r| r.ok())
+        .unwrap_or(Value::Null)
 }
 
 impl WebClient {
@@ -194,8 +208,12 @@ pub async fn qr_start() -> Result<(WebQr, String, i64), String> {
         .text()
         .await
         .map_err(net_err)?;
-    let at = page.find("window.init = ").ok_or("Страница входа ВК не открылась")?;
-    let init: Value = serde_json::Deserializer::from_str(&page[at + 14..])
+    // Не полагаемся на точное «window.init = » с пробелами: ВК периодически
+    // меняет форматирование страницы.
+    let at = page.find("window.init").ok_or("Страница входа ВК не открылась")?;
+    let rest = &page[at..];
+    let eq = rest.find('=').ok_or("Страница входа ВК не открылась")?;
+    let init: Value = serde_json::Deserializer::from_str(rest[eq + 1..].trim_start())
         .into_iter::<Value>()
         .next()
         .and_then(|r| r.ok())

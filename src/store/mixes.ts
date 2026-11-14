@@ -61,7 +61,7 @@ const clean = (list: Track[], max: number) => {
   return out;
 };
 
-const GENRES: [number, string][] = [[3, "Рэп"], [2, "Поп"], [1, "Рок"], [5, "Электроника"], [21, "Альтернатива"], [17, "Инди"], [4, "Спокойное"]];
+const GENRES: [number, string][] = [[3, "Рэп"], [2, "Поп"], [1, "Рок"], [5, "Электроника"], [7, "Альтернатива"], [17, "Инди"], [4, "Спокойное"]];
 
 async function build(uid: number, library: Track[], day: string): Promise<Mix[]> {
   const r = rng(`${uid}:${day}`);
@@ -85,15 +85,13 @@ async function build(uid: number, library: Track[], day: string): Promise<Mix[]>
   const genre = GENRES[hash(day) % GENRES.length];
   const mineSet = new Set(library.flatMap((t) => trackArtists(t).map(norm)));
 
-  const [recs1, recs2, simA, simB, pop, gen] = await Promise.all([
-    safe(api.recommendations(), [] as Track[]),
+  const [recs, simA, simB, pop, gen] = await Promise.all([
     safe(api.recommendations(), [] as Track[]),
     seedA ? safe(api.similar(seedTrack(seedA)!), [] as Track[]) : Promise.resolve([] as Track[]),
     seedB ? safe(api.similar(seedTrack(seedB)!), [] as Track[]) : Promise.resolve([] as Track[]),
     safe(api.popular(0), [] as Track[]),
     safe(api.popular(genre[0]), [] as Track[]),
   ]);
-  const recs = [...recs1, ...recs2];
   const mixes: Mix[] = [];
   const add = (m: Omit<Mix, "tracks">, tracks: Track[], min = 8) => { if (tracks.length >= min) mixes.push({ ...m, tracks }); };
 

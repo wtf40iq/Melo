@@ -13,13 +13,21 @@ export function DeepSearch({ artist: a0 = "", title: t0 = "" }: { artist?: strin
   const ui = useUi();
   const [artist, setArtist] = useState(a0);
   const [title, setTitle] = useState(t0);
+  // Компонент может остаться смонтированным при переходе на другой точный поиск.
+  // Подхватываем новые значения из маршрута, не сбрасывая то, что пользователь уже ввёл сам.
+  useEffect(() => { setArtist(a0); setTitle(t0); }, [a0, t0]);
   const [res, setRes] = useState<Track[] | null>(null);
   const [loading, setLoading] = useState(false);
   const seq = useRef(0);
 
   useEffect(() => {
     const a = artist.trim(), ti = title.trim();
-    if (!a && !ti) { setRes(null); setLoading(false); return; }
+    if (!a && !ti) {
+      seq.current++;
+      setRes(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     const my = ++seq.current;
     const id = setTimeout(() => {

@@ -32,6 +32,8 @@ export function SearchPage({ query }: { query: string }) {
   // Запрос в другой раскладке, если по исходному почти ничего нет («ghbdtn» → «привет»)
   const [fixed, setFixed] = useState<string | null>(null);
   const [asTyped, setAsTyped] = useState(false);
+  const [sort, setSort] = useState<"relevance" | "artist" | "title" | "duration">("relevance");
+  const [onlyAvailable, setOnlyAvailable] = useState(false);
 
   useEffect(() => {
     const id = setTimeout(() => setQ(query.trim()), 220); // ждём, пока человек допечатает
@@ -45,9 +47,18 @@ export function SearchPage({ query }: { query: string }) {
     setExtras(null);
     setFixed(null);
     if (!q) return;
+    if (q.length < 2) {
+      // Одна буква — это не поиск: не дёргаем ВК десятками запросов.
+      setTracks([]);
+      setExtras({ playlists: [], artists: [] });
+      return;
+    }
     const alt = asTyped ? null : switchLayout(q);
     const extras = (x: string) => api.searchExtras(x).then((r) => alive && setExtras(r)).catch(() => alive && setExtras({ playlists: [], artists: [] }));
     let extrasFor = q;
+    // Сначала показываем первую быструю страницу, полную выдачу догружаем следом.
+    api.searchTracksFast(q).then((r) => { if (alive && r.length) setTracks(r); }).catch(() => {});
+    const fullTimer = window.setTimeout(() => {
     api.searchTracks(q)
       .then(async (r) => {
         if (!alive) return;
@@ -65,16 +76,17 @@ export function SearchPage({ query }: { query: string }) {
         }
         if (alive) setTracks(r);
       })
-      .catch((e) => { if (alive) { setTracks([]); ui.toast(errorText(e)); } });
+      .catch((e) => { if (alive) { setTracks((prev) => prev ?? []); ui.toast(errorText(e)); } });
+    }, 250);
     extras(q);
-    return () => { alive = false; };
+    return () => { alive = false; clearTimeout(fullTimer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [q, asTyped]);
   useEffect(() => setAsTyped(false), [query]);
 
   // Запрос попадает в историю, когда человек задержался на результатах
   useEffect(() => {
-    if (!q || tracks == null) return;
+    if (!q || q.length < 2 || tracks == null) return;
     const id = setTimeout(() => searchHistory.add(q), 1500);
     return () => clearTimeout(id);
   }, [q, tracks]);
@@ -86,11 +98,30 @@ export function SearchPage({ query }: { query: string }) {
     return rankTracks(lib.tracks.filter((x) => coverage(s, `${x.artist} ${x.title}`) >= 1), { any: s }).slice(0, 5);
   }, [query, lib.tracks]);
 
-  const list = tracks ?? [];
+  const list = useMemo(() => {
+    let out = onlyAvailable ? (tracks ?? []).filter((x) => !!x.url) : (tracks ?? []).slice();
+    if (sort === "artist") out.sort((a, b) => a.artist.localeCompare(b.artist, "ru", { sensitivity: "base" }));
+    if (sort === "title") out.sort((a, b) => a.title.localeCompare(b.title, "ru", { sensitivity: "base" }));
+    if (sort === "duration") out.sort((a, b) => a.duration - b.duration);
+    return out;
+  }, [tracks, sort, onlyAvailable]);
   const pls = extras?.playlists ?? [];
   const artists = extras?.artists ?? [];
   const loading = tracks == null;
+  const short = q.length > 0 && q.length < 2;
   const deep = () => ui.navigate({ name: "deep", ...split(query.trim()) });
+
+  if (short) {
+    return (
+      <div className="page">
+        <div className="search-head">
+          <h1 className="page-title">{t("Поиск: «{q}»", { q: query.trim() })}</h1>
+          <button className="btn secondary sm-btn" onClick={deep}><SlidersHorizontal size={15} /> {t("Точный поиск")}</button>
+        </div>
+        <Empty title={t("Введите хотя бы 2 символа")} text={t("Так ВК не получит лишние десятки запросов")} />
+      </div>
+    );
+  }
 
   return (
     <div className="page">
@@ -130,6 +161,19 @@ export function SearchPage({ query }: { query: string }) {
         <section>
           <PlaylistGrid items={pls} />
         </section>
+      )}
+      {(tab === "all" || tab === "tracks") && !loading && (
+        <div className="search-filters chips">
+          {([
+            ["relevance", "По релевантности"],
+            ["artist", "Артист"],
+            ["title", "Название"],
+            ["duration", "Длительность"],
+          ] as const).map(([id, label]) => (
+            <button key={id} className={`chip ${sort === id ? "active" : ""}`} onClick={() => setSort(id)}>{t(label)}</button>
+          ))}
+          <button className={`chip ${onlyAvailable ? "active" : ""}`} onClick={() => setOnlyAvailable((v) => !v)}>{t("Только доступные")}</button>
+        </div>
       )}
       {(tab === "all" || tab === "tracks") && (loading ? <Loading /> : list.length > 0 && (
         <section>

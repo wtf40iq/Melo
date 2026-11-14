@@ -48,10 +48,12 @@ const Row = memo(function Row({ t, i, current, playing, liked, showAlbum, sortab
     <div
       role="row"
       data-index={i}
+      tabIndex={0}
       className={`tl-row ${current ? "current" : ""} ${t.url ? "" : "unavailable"}`}
       style={{ top, ["--i" as string]: intro }}
       onPointerDown={(e) => h.press(e, i)}
       onDoubleClick={() => h.play(i)}
+      onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) h.play(i); }}
       onContextMenu={(e) => { e.preventDefault(); h.menu(i, e.clientX, e.clientY); }}
     >
       <span className="tl-num">

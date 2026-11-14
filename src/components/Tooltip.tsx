@@ -14,7 +14,7 @@ export const Tooltip = memo(function Tooltip() {
       const el = node.current;
       if (!el) return;
       const { x, y } = pos.current;
-      el.style.left = `${Math.min(x + 14, window.innerWidth - 260)}px`;
+      el.style.left = `${Math.max(4, Math.min(x + 14, window.innerWidth - 300))}px`;
       el.style.top = `${y + 22 > window.innerHeight - 40 ? y - 36 : y + 20}px`;
     };
     const move = (e: MouseEvent) => {
@@ -49,7 +49,7 @@ export const Tooltip = memo(function Tooltip() {
     };
   }, []);
   if (!tip) return null;
-  const left = Math.min(tip.x + 14, window.innerWidth - 260);
+  const left = Math.max(4, Math.min(tip.x + 14, window.innerWidth - 300));
   const top = tip.y + 22 > window.innerHeight - 40 ? tip.y - 36 : tip.y + 20;
   return <div ref={node} className="cursor-tip" style={{ left, top }}>{tip.text}</div>;
 });

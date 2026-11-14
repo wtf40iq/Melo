@@ -52,6 +52,14 @@ jobs:
       - run: npm ci
         if: steps.ver.outputs.skip != 'true'
 
+      - name: Проверка типов
+        if: steps.ver.outputs.skip != 'true'
+        run: npm run typecheck
+
+      - name: Тесты Rust
+        if: steps.ver.outputs.skip != 'true'
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
       - name: Сборка
         if: steps.ver.outputs.skip != 'true'
         run: npx tauri build --bundles nsis
@@ -66,6 +74,22 @@ jobs:
           Compress-Archive -Path out/Melo.exe -DestinationPath "out/Melo-windows-$tag.zip"
           $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           Copy-Item $setup.FullName "out/Melo-setup-$tag.exe"
+          # Контрольная сумма: автообновление без неё не устанавливает файл
+          $hash = (Get-FileHash out/Melo.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  Melo.exe" | Out-File -FilePath out/Melo.exe.sha256 -Encoding ascii -NoNewline
+
+      - name: Заметки к релизу из CHANGELOG
+        if: steps.ver.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
+          $ver = $tag.TrimStart("v")
+          $all = Get-Content CHANGELOG.md -Raw
+          $pattern = "(?ms)^##\s+" + [regex]::Escape($ver) + "\s*\r?\n(.*?)(?=^##\s+|\z)"
+          $m = [regex]::Match($all, $pattern)
+          if (-not $m.Success) { throw "В CHANGELOG.md нет раздела $ver" }
+          $body = $m.Groups[1].Value.Trim()
+          $body | Out-File -FilePath out/release-notes.md -Encoding utf8
 
       - name: Релиз на GitHub
         if: steps.ver.outputs.skip != 'true'
@@ -75,17 +99,10 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: Melo ${{ steps.ver.outputs.tag }}
           make_latest: true
-          generate_release_notes: true
-          body: |
-            ## Что нового
-            - Исправлены скачки курсора при масштабе интерфейса 90%, 110% и 125%: координаты учитывают масштаб Windows и зум WebView2.
-            - Убран лишний опрос Windows при обычной прокрутке, чтобы избежать конфликтов координат и дополнительной нагрузки.
-            - Запоздалые ответы опроса больше не перезаписывают положение после движения, клика или завершения перетаскивания полосы прокрутки.
-            - При смене масштаба корректно обновляется положение курсора, сбрасывается растяжение и очищаются старые эффекты.
-            - Исправлена обработка отмены нажатия; изменение размера скрытого окна не выделяет заново большой холст курсора.
-
-            **Установка:** `Melo-setup-${{ steps.ver.outputs.tag }}.exe`. Без установки — `Melo.exe`.
+          # Текст берём из CHANGELOG.md, а не из случайных сообщений коммитов
+          body_path: out/release-notes.md
           files: |
             out/Melo.exe
+            out/Melo.exe.sha256
             out/Melo-windows-${{ steps.ver.outputs.tag }}.zip
             out/Melo-setup-${{ steps.ver.outputs.tag }}.exe

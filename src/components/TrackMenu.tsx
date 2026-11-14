@@ -1,18 +1,22 @@
 import { createPortal } from "react-dom";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { ChevronLeft, Copy, ListEnd, ListPlus, ListStart, ListX, Plus, Radio, Search, Trash2 } from "lucide-react";
-import { api } from "../api";
+import { invoke } from "@tauri-apps/api/core";
+import { ChevronLeft, Copy, Download, ExternalLink, EyeOff, Link2, ListEnd, ListPlus, ListStart, ListX, Plus, Radio, Search, Trash2 } from "lucide-react";
+import { api, inTauri } from "../api";
 import { useLibrary } from "../store/library";
 import { usePlayer } from "../store/player";
 import { errorText, useUi } from "../store/ui";
 import { Track } from "../types";
 import { useT } from "../store/settings";
+import { hideFromWave } from "../store/wave";
+import { DownloadDialog } from "./DownloadDialog";
 
 type Props = { track: Track; x: number; y: number; onClose: () => void; onRemove?: () => void; removeLabel?: string };
 
 export function TrackMenu({ track, x, y, onClose, onRemove, removeLabel }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const [view, setView] = useState<"main" | "playlists">("main");
+  const [download, setDownload] = useState(false);
   const [pos, setPos] = useState({ left: x, top: y });
   const lib = useLibrary();
   const player = usePlayer();
@@ -47,6 +51,19 @@ export function TrackMenu({ track, x, y, onClose, onRemove, removeLabel }: Props
   const act = (fn: () => void) => () => { fn(); onClose(); };
   const off = track.id.startsWith("off:");
   const editable = lib.playlists.filter((p) => p.editable);
+  const vkLink = `https://vk.com/audio${track.ownerId}_${track.audioId}`;
+  const openVk = async () => {
+    try {
+      if (inTauri) await invoke("open_external", { url: vkLink });
+      else window.open(vkLink, "_blank", "noopener");
+    } catch (e) {
+      ui.toast(errorText(e));
+    }
+  };
+  const copyVk = async () => {
+    try { await navigator.clipboard?.writeText(vkLink); ui.toast(t("Ссылка скопирована")); }
+    catch { ui.toast(t("Не удалось скопировать")); }
+  };
 
   return createPortal(
     <div className="menu" ref={ref} style={pos} role="menu">
@@ -62,6 +79,7 @@ export function TrackMenu({ track, x, y, onClose, onRemove, removeLabel }: Props
           {onRemove && (
             <button className="danger" onClick={act(onRemove)}><ListX size={16} /> {t(removeLabel ?? "Удалить из плейлиста")}</button>
           )}
+          {!off && <button onClick={() => setDownload(true)}><Download size={16} /> {t("Скачать в офлайн")}</button>}
           {!off && <button onClick={act(() => api.similar(track).then((list) => {
             if (!list.length) return ui.toast("Похожих треков не нашлось");
             player.playList([track, ...list]);
@@ -69,9 +87,16 @@ export function TrackMenu({ track, x, y, onClose, onRemove, removeLabel }: Props
           }).catch((e) => ui.toast(errorText(e))))}><Radio size={16} /> {t("Слушать похожее")}</button>}
           <div className="menu-sep" />
           <button onClick={act(() => (track.artists?.[0] ? ui.navigate({ name: "artist", artist: track.artists[0] }) : off ? ui.setQuery(track.artist) : ui.navigate({ name: "artist", artist: { name: track.artist.split(/\s*,\s*/)[0] } })))}><Search size={16} /> {t("Перейти к исполнителю")}</button>
-          <button onClick={act(() => navigator.clipboard?.writeText(`${track.artist} — ${track.title}`))}>
+          <button onClick={act(() => { void navigator.clipboard?.writeText(`${track.artist} — ${track.title}`).catch(() => {}); })}>
             <Copy size={16} /> {t("Скопировать название")}
           </button>
+          {!off && <>
+            <button onClick={act(copyVk)}><Link2 size={16} /> {t("Скопировать ссылку ВК")}</button>
+            <button onClick={act(() => { void openVk(); })}><ExternalLink size={16} /> {t("Открыть в ВК")}</button>
+            <button onClick={act(() => { hideFromWave(track); ui.toast(t("Больше не появится в волне")); })}>
+              <EyeOff size={16} /> {t("Не играть в волне")}
+            </button>
+          </>}
         </>
       ) : (
         <>
@@ -92,6 +117,7 @@ export function TrackMenu({ track, x, y, onClose, onRemove, removeLabel }: Props
           </div>
         </>
       )}
+      {download && <DownloadDialog track={track} onClose={() => setDownload(false)} />}
     </div>,
     document.body,
   );

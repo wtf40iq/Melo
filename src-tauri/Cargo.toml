@@ -1,6 +1,6 @@
 [package]
 name = "melo"
-version = "0.9.10"
+version = "0.9.11"
 description = "Лёгкий плеер для музыки ВК"
 edition = "2021"
 
@@ -21,7 +21,7 @@ serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "blocking", "cookies", "http2"] }
 tiny_http = "0.12"
 tauri-plugin-single-instance = "2"
-arboard = { version = "3", default-features = false }
+tauri-plugin-global-shortcut = "2"
 lofty = "0.22"
 rfd = { version = "0.15", default-features = false }
 tokio = { version = "1", features = ["sync", "time"] }
@@ -31,10 +31,21 @@ sha2 = "0.10"
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.39"
 windows-core = "0.62"
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 
 [profile.release]
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
+# unwind, а не abort: паника в одном потоке (сеть, прокси, обновление)
+# не должна закрывать весь плеер вместе с музыкой.
+panic = "unwind"
 strip = true
+
+# Быстрая сборка для проверки изменений: без LTO и с параллельным кодогеном.
+# Финальный релиз по-прежнему собирается профилем release.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

@@ -10,7 +10,9 @@ export function Shelf({ title, hint, action, children }: { title: string; hint?:
   const check = () => {
     const el = row.current;
     if (!el) return;
-    setEdge({ left: el.scrollLeft < 4, right: el.scrollLeft + el.clientWidth >= el.scrollWidth - 4 });
+    const next = { left: el.scrollLeft < 4, right: el.scrollLeft + el.clientWidth >= el.scrollWidth - 4 };
+    // Не создаём новый объект на каждый scroll: иначе полка перерисовывается 60 раз в секунду.
+    setEdge((prev) => (prev.left === next.left && prev.right === next.right ? prev : next));
   };
   useEffect(() => {
     check();

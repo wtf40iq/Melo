@@ -124,7 +124,6 @@ export type SkinRefs = {
   chromeShine: SVGLinearGradientElement | null;
   shocks: (HTMLDivElement | null)[];
   shockMaps: (SVGFEDisplacementMapElement | null)[];
-  shockMaps2: (SVGFEDisplacementMapElement | null)[];
   shockImgs: (SVGFEImageElement | null)[];
 };
 

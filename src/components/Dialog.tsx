@@ -1,6 +1,7 @@
 import { createPortal } from "react-dom";
 import { ReactNode, useEffect, useState } from "react";
 import { useT } from "../store/settings";
+import { useFocusTrap } from "../useFocusTrap";
 
 type Props = {
   title: string;
@@ -17,6 +18,7 @@ type Props = {
 /** Небольшое окно подтверждения или ввода. */
 export function Dialog({ title, text, icon, confirm, danger, input, onConfirm, onClose }: Props) {
   const t = useT();
+  const trap = useFocusTrap<HTMLDivElement>();
   const [value, setValue] = useState(input ?? "");
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -31,7 +33,7 @@ export function Dialog({ title, text, icon, confirm, danger, input, onConfirm, o
   };
   return createPortal(
     <div className="upd-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="upd-card dialog-card" role="dialog" aria-label={t(title)}>
+      <div ref={trap} tabIndex={-1} className="upd-card dialog-card" role="dialog" aria-modal="true" aria-label={t(title)}>
         {icon && <span className={`upd-icon ${danger ? "danger" : ""}`}>{icon}</span>}
         <h3>{t(title)}</h3>
         {text && <p className="muted">{text}</p>}

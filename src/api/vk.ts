@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { Account, AppInfo, DirectAuth, MusicApi, QrCode, QrStatus } from "./types";
-import { Artist, Lyrics, OfflinePlaylist, Playlist, Profile, Track } from "../types";
-import { baseTitle, coverage, dedupeTracks, norm, sameSongScore, rankTracks, relevant, trackArtists, uniqueTracks, variantScore, words } from "./match";
+import { Artist, isOffline, Lyrics, OfflinePlaylist, Playlist, Profile, Track } from "../types";
+import { baseTitle, coverage, dedupeTracks, norm, sameSongScore, rankTracks, trackArtists, uniqueTracks, variantScore, words } from "./match";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 const lang = () => {
@@ -11,8 +11,29 @@ const lang = () => {
     return "ru";
   }
 };
+// Не больше четырёх одновременных запросов к ВК: поиск и главная иначе легко
+// упираются в flood control.
+let activeCalls = 0;
+const callQueue: (() => void)[] = [];
+const limited = <T,>(fn: () => Promise<T>): Promise<T> => new Promise((resolve, reject) => {
+  const run = () => {
+    activeCalls++;
+    fn().then(resolve, reject).finally(() => {
+      activeCalls--;
+      callQueue.shift()?.();
+    });
+  };
+  if (activeCalls < 4) run();
+  else callQueue.push(run);
+});
 const call = <T = any>(method: string, params: Record<string, unknown> = {}) =>
+  limited(() => invoke<T>("vk_call", { method, params: { lang: lang(), ...params } }));
+// Быстрый одиночный запрос в обход общей очереди — для первого экрана поиска.
+const callNow = <T = any>(method: string, params: Record<string, unknown> = {}) =>
   invoke<T>("vk_call", { method, params: { lang: lang(), ...params } });
+
+const bestThumb = (p: any): string | undefined =>
+  p?.photo_1200 || p?.photo_600 || p?.photo_300 || p?.photo_270 || p?.photo_135 || p?.photo_68 || p?.url;
 
 const mapTrack = (a: any): Track => ({
   id: `${a.owner_id}_${a.id}`,
@@ -22,7 +43,7 @@ const mapTrack = (a: any): Track => ({
   title: a.title + (a.subtitle ? ` (${a.subtitle})` : ""),
   artist: a.artist,
   album: a.album?.title,
-  cover: a.album?.thumb?.photo_135 || a.album?.thumb?.photo_68,
+  cover: bestThumb(a.album?.thumb) || bestThumb(a.album?.thumbs?.[0]),
   duration: a.duration,
   explicit: !!a.is_explicit,
   url: a.url && !a.url.includes("audio_api_unavailable") ? a.url : undefined,
@@ -36,6 +57,8 @@ const mapTrack = (a: any): Track => ({
 /** Короткий кеш поиска: повторный запрос и «назад» — мгновенно. */
 const cache = new Map<string, { expires: number; v: Promise<any> }>();
 let cacheTimer: ReturnType<typeof setTimeout> | undefined;
+// Новый поисковый запрос отменяет догрузку страниц старого.
+let searchEpoch = 0;
 function clearCache() { cache.clear(); clearTimeout(cacheTimer); cacheTimer = undefined; }
 function sweepCache() {
   const now = Date.now();
@@ -52,14 +75,14 @@ function cached<T>(key: string, make: () => Promise<T>, ttl = 5 * 60_000): Promi
   const v = make(), item = { expires: now + ttl, v };
   cache.delete(scoped); cache.set(scoped, item);
   v.catch(() => { if (cache.get(scoped) === item) cache.delete(scoped); });
-  while (cache.size > 40) cache.delete(cache.keys().next().value!);
+  while (cache.size > 50) cache.delete(cache.keys().next().value!);
   if (!cacheTimer) cacheTimer = setTimeout(sweepCache, 30_000);
   return v;
 }
 
 const photoOf = (p: any): string | undefined => {
   if (Array.isArray(p)) return [...p].sort((a, b) => (b.width ?? 0) - (a.width ?? 0))[0]?.url;
-  return p?.photo_300 || p?.photo_270 || p?.url;
+  return bestThumb(p);
 };
 
 const localUrl = (kind: "local" | "cover", rel: string) => `${streamBase || "http://vkstream.localhost/"}${kind}?p=${encodeURIComponent(rel)}`;
@@ -112,7 +135,7 @@ const mapPlaylist = (p: any, myId?: number): Playlist => ({
   title: p.title,
   subtitle: p.main_artists?.map((a: any) => a.name).join(", ") || (p.year && p.owner_id !== myId ? String(p.year) : ""),
   count: p.count,
-  cover: p.photo?.photo_300 || p.photo?.photo_270 || p.thumbs?.[0]?.photo_300 || p.thumbs?.[0]?.photo_270,
+  cover: bestThumb(p.photo) || bestThumb(p.thumbs?.[0]),
   editable: p.owner_id === myId && !p.original,
 });
 
@@ -215,7 +238,7 @@ function catalogSearch(q: string): Promise<CatalogResult> {
     // Полный список треков: листаем раздел «Показать все»
     if (more?.section) {
       let from: string | undefined;
-      for (let page = 0; page < 8 && tracks.length < 800; page++) {
+      for (let page = 0; page < 4 && tracks.length < 400; page++) {
         const s = await call("catalog.getSection", { section_id: more.section, start_from: from, v: CATALOG_V }).catch(() => null);
         if (!s) break;
         const sp = catalogPools(s);
@@ -259,14 +282,6 @@ export const vkApi: MusicApi = {
     return profileAfterLogin(uid);
   },
 
-  async browserLogin() {
-    const uid = await invoke<number>("vk_browser_login");
-    return profileAfterLogin(uid);
-  },
-  async browserSubmit(text) {
-    // null — ключ подхватил ждущий вход; число — ожидание уже закончилось, и Melo вошёл сам
-    return invoke<number | null>("vk_browser_submit", { text });
-  },
   async directLogin(p) {
     const r = await invoke<DirectAuth>("vk_direct_login", {
       login: p.login, password: p.password, code: p.code ?? null, sms: p.sms ?? null,
@@ -275,9 +290,6 @@ export const vkApi: MusicApi = {
     if (r.state !== "ok" || !r.uid) return r;
     return { ...r, profile: await profileAfterLogin(r.uid) };
   },
-  browserReopen: () => invoke("vk_browser_reopen"),
-  browserCancel: () => invoke("vk_browser_cancel"),
-
   qrStart() {
     return invoke<QrCode>("qr_start");
   },
@@ -307,30 +319,62 @@ export const vkApi: MusicApi = {
     return { items: items(r).map(mapTrack), total: r?.count ?? 0 };
   },
 
-  async myPlaylists() {
-    const r = await call("audio.getPlaylists", { owner_id: me?.id, count: 100 });
-    return items(r).map((p: any) => mapPlaylist(p, me?.id));
+  myPlaylists() {
+    return cached("mypl", async () => {
+      const r = await call("audio.getPlaylists", { owner_id: me?.id, count: 100 });
+      return items(r).map((p: any) => mapPlaylist(p, me?.id));
+    }, 60_000);
   },
 
-  async playlistTracks(pl) {
-    const r = await call("audio.get", {
-      owner_id: pl.ownerId,
-      album_id: pl.playlistId,
-      access_key: pl.accessKey,
-      count: 1000,
-    });
-    return items(r).map(mapTrack);
+  playlistTracks(pl) {
+    const run = async () => {
+      // ВК может урезать count и не отдавать весь плейлист одним запросом.
+      // Идём по offset на фактический размер страницы и ориентируемся на total (count),
+      // а не на предположение «ровно 1000 за раз».
+      const out: Track[] = [];
+      const PAGE = 1000;
+      for (let offset = 0; offset < 20000;) {
+        const r = await call("audio.get", {
+          owner_id: pl.ownerId,
+          album_id: pl.playlistId,
+          access_key: pl.accessKey,
+          offset,
+          count: PAGE,
+        }).catch((e) => {
+          if (!offset) throw e;
+          console.warn("playlistTracks: не удалось догрузить страницу", offset, e);
+          return null;
+        });
+        if (!r) break;
+        const page = items(r).map(mapTrack);
+        if (!page.length) break;
+        out.push(...page);
+        const total = Number(r?.count) || 0;
+        offset += page.length;
+        if (total && out.length >= total) break;
+        if (!total && page.length < PAGE) break;
+      }
+      return out;
+    };
+    // Огромные плейлисты не кэшируем целиком: они съедают десятки мегабайт.
+    return pl.count > 3000 ? run() : cached(`pl:${pl.id}:${pl.accessKey ?? ""}`, run, 5 * 60_000);
   },
 
-  async recommendations() {
-    const r = await call("audio.getRecommendations", { count: 60, shuffle: 1 });
-    return items(r).map(mapTrack);
+  recommendations() {
+    return cached("recs", async () => {
+      const r = await call("audio.getRecommendations", { count: 60, shuffle: 1 });
+      return items(r).map(mapTrack);
+    }, 2 * 60_000);
   },
 
   popular(genreId) {
     return cached(`popular:${genreId || 0}`, async () => {
       try {
-        const r = await call("audio.getPopular", { count: 60, only_eng: 0 });
+        const r = await call("audio.getPopular", {
+          count: 60,
+          only_eng: 0,
+          genre_id: genreId && genreId > 0 ? genreId : undefined,
+        });
         return items(r).map(mapTrack);
       } catch {
         // audio.getPopular может быть недоступен для токена — пробуем рекомендации как fallback
@@ -349,18 +393,29 @@ export const vkApi: MusicApi = {
    *  2 — совпало название. Если такие есть, прочие треки исполнителя и случайные результаты скрываются.
    *  Nightcore/speed up/slowed и т. п. — сразу после точных совпадений, если их не просили.
    */
+  searchTracksFast(q) {
+    return cached(`tf:${norm(q)}`, async () => {
+      const r = await callNow("audio.search", { q: q.trim(), count: 300, offset: 0, auto_complete: 1 });
+      return rankTracks(items(r).map(mapTrack), { any: q }, false, true);
+    }, 2 * 60_000);
+  },
+
   searchTracks(q) {
     return cached(`t:${norm(q)}`, async () => {
+      const epoch = ++searchEpoch;
       const query = q.trim();
       // ВК путается в тире и знаках вроде «%» — ищем и так, и без них
       const clean = query.replace(/\s+[-–—]+\s+/g, " ").replace(/[%#@]/g, " ").replace(/\s+/g, " ").trim();
-      const pages = async (x: string, max = 1500, extra: Record<string, unknown> = { auto_complete: 1 }) => {
+      const pages = async (x: string, max = 900, extra: Record<string, unknown> = { auto_complete: 1 }) => {
         let out: Track[] = [];
         for (let off = 0; off < max; off += 300) {
+          if (epoch !== searchEpoch) break;
           const r = await call("audio.search", { q: x, count: 300, offset: off, ...extra }).catch((e) => { if (!off) throw e; return null; });
           const page = items(r).map(mapTrack);
           out = out.concat(page);
-          if (page.length < 290) break;
+          // Не полагаемся на «страница короче запрошенного = конец»:
+          // ВК может урезать count, и тогда мы потеряли бы всю выдачу после первой страницы.
+          if (!page.length) break;
         }
         return out;
       };
@@ -369,6 +424,7 @@ export const vkApi: MusicApi = {
         clean && clean !== query ? pages(clean) : Promise.resolve([] as Track[]),
         catalogSearch(query).then((c) => c.tracks),
       ]);
+      if (epoch !== searchEpoch) throw new Error("search_cancelled");
       if (res.every((r) => r.status === "rejected")) throw (res[0] as PromiseRejectedResult).reason;
       const got = (i: number) => (res[i].status === "fulfilled" ? (res[i] as PromiseFulfilledResult<Track[]>).value : []);
       let all = uniqueTracks([...got(0), ...got(1), ...got(2)]);
@@ -394,19 +450,20 @@ export const vkApi: MusicApi = {
       // Добираем все версии и перезаливы: загрузки с этим исполнителем в поле «исполнитель»,
       // поиск по одному названию (оставляем то, где упомянут исполнитель), другой порядок слов,
       // треки и альбомы самого исполнителя.
-      if (who && rest) {
+      if (who && rest && epoch === searchEpoch) {
         const title = (dash.length >= 2 ? dash.slice(1).join(" - ") : rest).trim();
         const mentions = (t: Track) => coverage(who!.name, `${t.artist} ${t.title}`) >= 1;
         const none = () => [] as Track[];
         const [own, albums, byName, byTitle, swapped, joined] = await Promise.all([
           vkApi.artistTracks(who).catch(() => [] as Track[]),
           who.id ? vkApi.artistAlbums(who).catch(() => [] as Playlist[]) : Promise.resolve([] as Playlist[]),
-          pages(who.name, 1200, { performer_only: 1 }).catch(none),
-          pages(title, 900).then((l) => l.filter(mentions)).catch(none),
-          pages(`${title} ${who.name}`, 600).catch(none),
-          pages(`${who.name} ${title}`, 600, { auto_complete: 0 }).catch(none),
+          pages(who.name, 600, { performer_only: 1 }).catch(none),
+          pages(title, 600).then((l) => l.filter(mentions)).catch(none),
+          pages(`${title} ${who.name}`, 300).catch(none),
+          pages(`${who.name} ${title}`, 300, { auto_complete: 0 }).catch(none),
         ]);
-        const fromAlbums = await Promise.allSettled(albums.slice(0, 8).map((p) => vkApi.playlistTracks(p)));
+        if (epoch !== searchEpoch) throw new Error("search_cancelled");
+        const fromAlbums = await Promise.allSettled(albums.slice(0, 4).map((p) => vkApi.playlistTracks(p)));
         const extra = [...own, ...byName, ...byTitle, ...swapped, ...joined, ...fromAlbums.flatMap((r) => (r.status === "fulfilled" ? r.value : []))];
         // Берём только треки с нужным названием, а не всю дискографию
         all = uniqueTracks([...all, ...extra.filter((t) => coverage(rest, bare(t.title)) >= 1)]);
@@ -454,7 +511,7 @@ export const vkApi: MusicApi = {
       }
       if (!artists.length) {
         // ВК не дал исполнителей — берём из найденных треков тех, чьё имя есть в запросе
-        const tracks = await vkApi.searchTracks(q).catch(() => [] as Track[]);
+        const tracks = await vkApi.searchTracksFast(q).catch(() => [] as Track[]);
         const seen = new Map<string, Artist>();
         for (const t of tracks) for (const a of t.artists ?? []) {
           if (coverage(a.name, q) >= 1 || coverage(q, a.name) >= 1) if (!seen.has(norm(a.name))) seen.set(norm(a.name), a);
@@ -489,7 +546,7 @@ export const vkApi: MusicApi = {
         const found = all.flatMap((t) => t.artists ?? []).find((x) => norm(x.name) === norm(a) && x.id);
         const who: Artist = found ?? { name: a };
         const [own, albums] = await Promise.all([vkApi.artistTracks(who).catch(() => []), vkApi.artistAlbums(who).catch(() => [])]);
-        const fromAlbums = await Promise.allSettled(albums.slice(0, 15).map((p) => vkApi.playlistTracks(p)));
+        const fromAlbums = await Promise.allSettled(albums.slice(0, 8).map((p) => vkApi.playlistTracks(p)));
         all = uniqueTracks([...all, ...own, ...fromAlbums.flatMap((r) => (r.status === "fulfilled" ? r.value : []))]);
         strict = rankTracks(all, { artist: a, title: ti }, true);
       }
@@ -549,7 +606,25 @@ export const vkApi: MusicApi = {
     return cached(`at:${a.id ?? ""}:${norm(a.name)}`, async () => {
       const mine = (t: Track) => (t.artists?.length ? t.artists.some((x) => (a.id && x.id === a.id) || norm(x.name) === norm(a.name)) : coverage(a.name, t.artist) >= 1);
       // Оба запроса сразу: что придёт по id — лучше, поиск — запасной вариант
-      const byId = a.id ? call("audio.getAudiosByArtist", { artist_id: a.id, count: 100 }).then((r) => items(r).map(mapTrack)).catch(() => [] as Track[]) : Promise.resolve([] as Track[]);
+      const byId = a.id ? (async () => {
+        const out: Track[] = [];
+        const PAGE = 100;
+        for (let offset = 0; offset < 10000;) {
+          const r = await call("audio.getAudiosByArtist", { artist_id: a.id, count: PAGE, offset }).catch((e) => {
+            console.warn("artistTracks: не удалось догрузить страницу", offset, e);
+            return null;
+          });
+          if (!r) break;
+          const page = items(r).map(mapTrack);
+          if (!page.length) break;
+          out.push(...page);
+          const total = Number(r?.count) || 0;
+          offset += page.length;
+          if (total && out.length >= total) break;
+          if (!total && page.length < PAGE) break;
+        }
+        return out;
+      })() : Promise.resolve([] as Track[]);
       const bySearch = call("audio.search", { q: a.name, performer_only: 1, count: 200 }).then((r) => items(r).map(mapTrack).filter(mine)).catch(() => [] as Track[]);
       const first = await byId;
       return dedupeTracks(first.length ? first : await bySearch);
@@ -598,8 +673,10 @@ export const vkApi: MusicApi = {
   offlineOpen: (id) => invoke("offline_open", { id: id ?? null }),
 
   async add(t) {
+    if (isOffline(t)) throw new Error("Офлайн-трек уже на компьютере");
+    if (!me) throw new Error("Аккаунт не готов — подождите загрузку профиля");
     const newId = await call<number>("audio.add", { owner_id: t.ownerId, audio_id: t.audioId, access_key: t.accessKey });
-    return { ...t, ownerId: me!.id, audioId: newId, id: `${me!.id}_${newId}`, accessKey: undefined };
+    return { ...t, ownerId: me.id, audioId: newId, id: `${me.id}_${newId}`, accessKey: undefined };
   },
 
   async remove(t) {
@@ -611,6 +688,7 @@ export const vkApi: MusicApi = {
   },
 
   async addToPlaylist(t, pl) {
+    clearCache();
     await call("audio.addToPlaylist", {
       owner_id: pl.ownerId,
       playlist_id: pl.playlistId,
@@ -619,42 +697,52 @@ export const vkApi: MusicApi = {
   },
 
   async createPlaylist(title) {
+    clearCache();
     const p = await call("audio.createPlaylist", { owner_id: me?.id, title });
     return mapPlaylist({ ...p, count: 0 }, me?.id);
   },
 
   async deletePlaylist(pl) {
+    clearCache();
     await call("audio.deletePlaylist", { owner_id: pl.ownerId, playlist_id: pl.playlistId });
   },
 
   async renamePlaylist(pl, title) {
+    clearCache();
     await call("audio.editPlaylist", { owner_id: pl.ownerId, playlist_id: pl.playlistId, title });
   },
 
   async removeFromPlaylist(t, pl) {
+    clearCache();
     await call("audio.removeFromPlaylist", { owner_id: pl.ownerId, playlist_id: pl.playlistId, audio_ids: `${t.ownerId}_${t.audioId}` });
   },
 
-  async lyrics(t) {
-    try {
-      const r = parseLyrics(await call("audio.getLyrics", { audio_id: `${t.ownerId}_${t.audioId}` }));
-      if (r) return r;
-    } catch {
-      /* старые версии API — пробуем по lyrics_id */
-    }
-    if (t.lyricsId) {
+  lyrics(t) {
+    if (isOffline(t)) return Promise.resolve(null);
+    return cached(`ly:${t.id}`, async () => {
       try {
-        return parseLyrics(await call("audio.getLyrics", { lyrics_id: t.lyricsId }));
+        const r = parseLyrics(await call("audio.getLyrics", { audio_id: `${t.ownerId}_${t.audioId}` }));
+        if (r) return r;
       } catch {
-        return null;
+        /* старые версии API — пробуем по lyrics_id */
       }
-    }
-    return null;
+      if (t.lyricsId) {
+        try {
+          return parseLyrics(await call("audio.getLyrics", { lyrics_id: t.lyricsId }));
+        } catch {
+          return null;
+        }
+      }
+      return null;
+    }, 30 * 60_000);
   },
 
-  async similar(t) {
-    const r = await call("audio.getRecommendations", { target_audio: `${t.ownerId}_${t.audioId}`, count: 60 });
-    return items(r).map(mapTrack).filter((x: Track) => x.id !== t.id);
+  similar(t) {
+    if (isOffline(t)) return Promise.resolve([]);
+    return cached(`sim:${t.id}`, async () => {
+      const r = await call("audio.getRecommendations", { target_audio: `${t.ownerId}_${t.audioId}${t.accessKey ? "_" + t.accessKey : ""}`, count: 60 });
+      return items(r).map(mapTrack).filter((x: Track) => x.id !== t.id);
+    }, 5 * 60_000);
   },
 
   vkShelves() {
@@ -710,6 +798,14 @@ export const vkApi: MusicApi = {
     clearCache();
     me = null;
     await invoke("account_switch", { userId });
+    // После переключения me должен указывать на новый аккаунт: от него зависят
+    // audio.add/createPlaylist и признак editable у плейлистов.
+    try {
+      await loadProfile();
+    } catch {
+      const acc = (await invoke<Account[]>("accounts_list").catch(() => [] as Account[])).find((a) => a.user_id === userId);
+      me = { id: userId, name: acc?.name ?? `id${userId}`, photo: acc?.photo };
+    }
   },
   removeAccount: (userId) => invoke("account_remove", { userId }),
   async detach() {

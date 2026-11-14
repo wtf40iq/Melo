@@ -97,7 +97,7 @@ static META_CACHE: Mutex<Option<HashMap<PathBuf, (SystemTime, TrackInfo)>>> = Mu
 
 fn track_info(path: &Path) -> TrackInfo {
     let mtime = fs::metadata(path).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-    if let Some((t, info)) = META_CACHE.lock().unwrap().as_ref().and_then(|c| c.get(path)) {
+    if let Some((t, info)) = META_CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|c| c.get(path)) {
         if *t == mtime {
             return info.clone();
         }
@@ -129,7 +129,12 @@ fn track_info(path: &Path) -> TrackInfo {
         artist = "Неизвестный исполнитель".into();
     }
     let info = TrackInfo { file, title, artist, album, duration, has_cover };
-    META_CACHE.lock().unwrap().get_or_insert_with(HashMap::new).insert(path.to_path_buf(), (mtime, info.clone()));
+    let mut cache = META_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    let map = cache.get_or_insert_with(HashMap::new);
+    // Кэш не должен расти бесконечно при больших фонотеках
+    if map.len() >= 2000 { map.clear(); }
+    map.insert(path.to_path_buf(), (mtime, info.clone()));
+    drop(cache);
     info
 }
 
@@ -172,17 +177,26 @@ pub fn offline_root_path() -> String {
 }
 
 #[tauri::command]
-pub fn offline_list() -> Vec<PlaylistInfo> {
-    let mut v: Vec<PlaylistInfo> = fs::read_dir(root())
-        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).filter_map(|p| info_of(&p)).collect())
-        .unwrap_or_default();
-    v.sort_by_key(|p| p.title.to_lowercase());
-    v
+pub async fn offline_list() -> Vec<PlaylistInfo> {
+    // Сканирование папок и чтение тегов не должны блокировать поток интерфейса.
+    tauri::async_runtime::spawn_blocking(|| {
+        let mut v: Vec<PlaylistInfo> = fs::read_dir(root())
+            .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).filter_map(|p| info_of(&p)).collect())
+            .unwrap_or_default();
+        v.sort_by_key(|p| p.title.to_lowercase());
+        v
+    })
+    .await
+    .unwrap_or_default()
 }
 
 #[tauri::command]
-pub fn offline_playlist(id: String) -> Result<PlaylistInfo, String> {
-    info_of(&pl_dir(&id)?).ok_or("Офлайн-плейлист не найден".into())
+pub async fn offline_playlist(id: String) -> Result<PlaylistInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        info_of(&pl_dir(&id)?).ok_or_else(|| "Офлайн-плейлист не найден".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -296,6 +310,90 @@ pub async fn offline_add_paths(id: String, paths: Vec<String>) -> Result<usize, 
     .map_err(|e| e.to_string())
 }
 
+/// Скачать трек из ВК в офлайн-плейлист. Поддерживаются прямые mp3/m4a-ссылки.
+pub async fn download(
+    http: &reqwest::Client,
+    url: &str,
+    playlist_id: &str,
+    title: &str,
+    artist: &str,
+    cover: Option<&str>,
+) -> Result<String, String> {
+    let u = url::Url::parse(url).map_err(|_| "Некорректная ссылка на трек")?;
+    if !super::resolves_public(&u) {
+        return Err("Ссылка на трек не является публичной https-ссылкой".into());
+    }
+    let dir = root().join(safe_name(playlist_id)?);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let ext = u.path().rsplit('.').next().unwrap_or("mp3").to_lowercase();
+    let ext = if AUDIO_EXT.contains(&ext.as_str()) { ext } else { "mp3".into() };
+    let clean: String = format!("{artist} - {title}")
+        .chars()
+        .map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { ' ' } else { c })
+        .collect();
+    let clean = clean.trim().trim_end_matches('.').trim();
+    let base = if clean.is_empty() { "track".to_string() } else { clean.chars().take(110).collect() };
+    let mut name = format!("{base}.{ext}");
+    let mut n = 2;
+    while dir.join(&name).exists() {
+        name = format!("{base} ({n}).{ext}");
+        n += 1;
+    }
+    let res = http
+        .get(url)
+        .timeout(std::time::Duration::from_secs(300))
+        .send()
+        .await
+        .map_err(|e| format!("Не удалось скачать: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("ВК не отдал файл: {}", res.status()));
+    }
+    let bytes = res.bytes().await.map_err(|e| format!("Загрузка прервалась: {e}"))?;
+    if bytes.len() < 1024 {
+        return Err("Скачанный файл слишком маленький".into());
+    }
+    fs::write(dir.join(&name), &bytes).map_err(|e| e.to_string())?;
+    if let Some(c) = cover {
+        if let Ok(cu) = url::Url::parse(c) {
+            if super::resolves_public(&cu) {
+                if let Ok(r) = http.get(c).timeout(std::time::Duration::from_secs(30)).send().await {
+                    if r.status().is_success() {
+                        if let Ok(b) = r.bytes().await {
+                            let _ = fs::write(dir.join("cover.jpg"), b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(name)
+}
+
+/// Импорт M3U: локальные файлы из плейлиста копируются в офлайн-плейлист.
+#[tauri::command]
+pub async fn offline_import_m3u(app: AppHandle, id: String) -> Result<usize, String> {
+    let dir = pl_dir(&id)?;
+    let Some(f) = dialog(&app).set_title("Импорт M3U").add_filter("M3U", &["m3u", "m3u8"]).pick_file().await else {
+        return Ok(0);
+    };
+    let path = f.path().to_path_buf();
+    let base = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let text = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut files = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let raw = line.strip_prefix("file://").unwrap_or(line);
+        let p = PathBuf::from(raw);
+        let p = if p.is_absolute() { p } else { base.join(p) };
+        if p.is_file() && AUDIO_EXT.contains(&ext(&p).as_str()) {
+            files.push(p);
+        }
+    }
+    let count = files.iter().filter(|p| copy_into(&dir, p).is_some()).count();
+    Ok(count)
+}
+
 /// Выбрать картинку обложки.
 #[tauri::command]
 pub async fn offline_pick_cover(app: AppHandle, id: String) -> Result<bool, String> {
@@ -304,11 +402,23 @@ pub async fn offline_pick_cover(app: AppHandle, id: String) -> Result<bool, Stri
         return Ok(false);
     };
     let src = f.path().to_path_buf();
-    for e in IMAGE_EXT {
-        let _ = fs::remove_file(dir.join(format!("cover.{e}")));
-    }
     let e = ext(&src);
-    fs::copy(&src, dir.join(format!("cover.{}", if e == "jpeg" { "jpg" } else { &e }))).map_err(|e| e.to_string())?;
+    if !IMAGE_EXT.contains(&e.as_str()) {
+        return Err("Это не картинка".into());
+    }
+    let dst = dir.join(format!("cover.{}", if e == "jpeg" { "jpg" } else { &e }));
+    // Если пользователь выбрал уже лежащую здесь обложку, не удаляем её перед копированием.
+    if src == dst {
+        return Ok(true);
+    }
+    // Копируем во временный файл, и только потом заменяем старую обложку:
+    // ошибка копирования не должна оставить плейлист без картинки.
+    let tmp = dir.join(".melo-cover.tmp");
+    fs::copy(&src, &tmp).map_err(|e| e.to_string())?;
+    for old in IMAGE_EXT {
+        let _ = fs::remove_file(dir.join(format!("cover.{old}")));
+    }
+    fs::rename(&tmp, &dst).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -332,7 +442,7 @@ pub fn offline_open(id: Option<String>) -> Result<(), String> {
 
 // ---------- Отдача файлов локальному плееру ----------
 
-fn mime(e: &str) -> &'static str {
+pub(crate) fn mime(e: &str) -> &'static str {
     match e {
         "mp3" => "audio/mpeg",
         "m4a" | "aac" | "alac" => "audio/mp4",
@@ -361,10 +471,23 @@ pub fn serve_file(req: tiny_http::Request, path: &Path, headers: Vec<tiny_http::
         .find(|h| h.field.equiv("Range"))
         .and_then(|h| h.value.as_str().strip_prefix("bytes=").map(str::to_string))
         .and_then(|r| {
+            if len == 0 { return None; }
             let (a, b) = r.split_once('-')?;
-            let a: u64 = a.trim().parse().ok()?;
-            let b: u64 = b.trim().parse().unwrap_or(len.saturating_sub(1)).min(len.saturating_sub(1));
-            (a <= b && a < len).then_some((a, b))
+            let (a, b) = (a.trim(), b.trim());
+            // bytes=-N — последние N байт (suffix range), его тоже нужно поддерживать
+            if a.is_empty() {
+                let n: u64 = b.parse().ok()?;
+                if n == 0 { return None; }
+                return Some((len.saturating_sub(n), len - 1));
+            }
+            let start: u64 = a.parse().ok()?;
+            let end: u64 = if b.is_empty() {
+                len - 1
+            } else {
+                let v: u64 = b.parse().ok()?;
+                v.min(len - 1)
+            };
+            (start <= end && start < len).then_some((start, end))
         });
     let mut hs = headers;
     hs.extend(super::hdr("Content-Type", mime(&ext(path))));
@@ -384,17 +507,20 @@ pub fn serve_file(req: tiny_http::Request, path: &Path, headers: Vec<tiny_http::
     let _ = req.respond(r);
 }
 
+/// Встроенная в теги обложка трека (для офлайн-плейлиста).
+pub(crate) fn cover_data(path: &Path) -> Option<(Vec<u8>, String)> {
+    let tagged = lofty::read_from_path(path).ok()?;
+    let tag = tagged.primary_tag().or_else(|| tagged.first_tag())?;
+    let p = tag.pictures().first()?;
+    Some((p.data().to_vec(), p.mime_type().map(|m| m.as_str().to_string()).unwrap_or_else(|| "image/jpeg".into())))
+}
+
 /// Обложка: картинка из папки или встроенная в теги трека.
 pub fn serve_cover(req: tiny_http::Request, path: &Path, headers: Vec<tiny_http::Header>) {
     if IMAGE_EXT.contains(&ext(path).as_str()) {
         return serve_file(req, path, headers);
     }
-    let pic = lofty::read_from_path(path).ok().and_then(|t| {
-        let tag = t.primary_tag().or_else(|| t.first_tag())?;
-        let p = tag.pictures().first()?;
-        Some((p.data().to_vec(), p.mime_type().map(|m| m.as_str().to_string()).unwrap_or_else(|| "image/jpeg".into())))
-    });
-    let Some((data, m)) = pic else {
+    let Some((data, m)) = cover_data(path) else {
         let _ = req.respond(tiny_http::Response::empty(404));
         return;
     };

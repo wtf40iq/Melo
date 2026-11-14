@@ -101,7 +101,7 @@ export function OfflineDrop() {
       )}
       {pending && !create && lists && createPortal(
         <div className="upd-backdrop" onMouseDown={(e) => e.target === e.currentTarget && !busy && setPending(null)}>
-          <div className="upd-card dialog-card off-dialog" role="dialog">
+          <div className="upd-card dialog-card off-dialog" role="dialog" aria-modal="true">
             <span className="upd-icon"><HardDriveDownload size={22} /></span>
             <h3>{t("Куда добавить музыку?")}</h3>
             <p className="muted">{t("Файлов: {n}", { n: pending.length })}</p>

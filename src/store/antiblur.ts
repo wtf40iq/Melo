@@ -11,6 +11,9 @@ export const antiBlur = {
   set(orig: Track, alt: Track) {
     const m = read();
     m[orig.id] = strip(alt);
+    // Старые записи не должны копиться годами и забивать localStorage.
+    const keys = Object.keys(m);
+    if (keys.length > 300) for (const k of keys.slice(0, keys.length - 300)) delete m[k];
     try { localStorage.setItem(KEY, JSON.stringify(m)); } catch { /* */ }
   },
   forget(id: string) {

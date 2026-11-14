@@ -14,6 +14,25 @@ export const WAVE_MODES: { id: WaveMode; label: string; hint: string }[] = [
 ];
 
 type WaveState = { mode: WaveMode; head: string | null; loading: boolean };
+const HIDDEN_KEY = "melo.waveHidden";
+const readHidden = (): string[] => {
+  try {
+    const v = JSON.parse(localStorage.getItem(HIDDEN_KEY) || "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+};
+/** Убрать конкретную песню из «Моей волны» (запоминается локально). */
+export function hideFromWave(t: Track) {
+  const key = trackKey(t);
+  const next = [key, ...readHidden().filter((x) => x !== key)].slice(0, 400);
+  try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(next)); } catch { /* */ }
+}
+export function clearWaveHidden() {
+  try { localStorage.removeItem(HIDDEN_KEY); } catch { /* */ }
+}
+export const waveHiddenCount = () => readHidden().length;
 let st: WaveState = { mode: (localStorage.getItem("melo.waveMode") as WaveMode) || "foryou", head: localStorage.getItem("melo.waveHead"), loading: false };
 if (!WAVE_MODES.some((m) => m.id === st.mode)) st.mode = "foryou";
 const subs = new Set<() => void>();
@@ -73,11 +92,12 @@ export async function waveBatch(mode: WaveMode, library: Track[], played: Track[
   } else {
     pool = [...(await api.popular(4).catch(() => [] as Track[])), ...(await api.popular(21).catch(() => [] as Track[])).slice(0, 15)];
   }
+  const hidden = new Set(readHidden());
   const out: Track[] = [];
   const take = (list: Track[]) => {
     for (const t of shuffle(list)) {
       const k = trackKey(t);
-      if (!t.url || seen.has(t.id) || keys.has(k)) continue;
+      if (!t.url || hidden.has(k) || seen.has(t.id) || keys.has(k)) continue;
       seen.add(t.id);
       keys.add(k);
       out.push(t);

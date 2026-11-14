@@ -12,6 +12,7 @@ const readJson = (k: string) => {
   try { return JSON.parse(localStorage.getItem(k) || "{}"); } catch { return {}; }
 };
 const readSettings = () => ({ ...readJson("melo.settings"), live: readJson("melo.live") });
+const cssUrl = (u: string) => `url("${u.replace(/["\\\n\r]/g, "")}")`;
 
 /** Меню у значка в трее: отдельное маленькое прозрачное окно. */
 export function TrayMenu() {
@@ -30,10 +31,17 @@ export function TrayMenu() {
       listen("tray-open", () => { setCfg(readSettings()); setOpen((n) => n + 1); }),
     ];
     const key = (e: KeyboardEvent) => e.key === "Escape" && act("hide");
+    const sync = () => setCfg(readSettings());
+    const noMenu = (e: MouseEvent) => e.preventDefault();
     window.addEventListener("keydown", key);
-    window.addEventListener("storage", () => setCfg(readSettings()));
-    window.addEventListener("contextmenu", (e) => e.preventDefault());
-    return () => { offs.forEach((p) => p.then((u) => u())); window.removeEventListener("keydown", key); };
+    window.addEventListener("storage", sync);
+    window.addEventListener("contextmenu", noMenu);
+    return () => {
+      offs.forEach((p) => p.then((u) => u()));
+      window.removeEventListener("keydown", key);
+      window.removeEventListener("storage", sync);
+      window.removeEventListener("contextmenu", noMenu);
+    };
   }, []);
 
   const glass = cfg.glass && cfg.glass !== "off";
@@ -51,7 +59,7 @@ export function TrayMenu() {
       {bg !== "none" && (
         <div className={`tray-bg fx-${bg}`} aria-hidden>
           {bg === "aurora" && <><i /><i /><i /><i /></>}
-          {bg === "cover" && st.cover && <div className="fx-cover" style={{ backgroundImage: `url("${st.cover}")` }} />}
+          {bg === "cover" && st.cover && <div className="fx-cover" style={{ backgroundImage: cssUrl(st.cover) }} />}
           {bg === "stars" && <Stars />}
         </div>
       )}

@@ -49,11 +49,7 @@ export const demoApi: MusicApi = {
   demo: true,
   restore: () => wait(null),
   login: () => wait({ id: 1, name: "skymywex" }),
-  browserLogin: () => new Promise((r) => setTimeout(() => r({ id: 1, name: "skymywex" }), 4000)),
-  browserSubmit: () => wait(null),
   directLogin: async (p) => (p.code ? { state: "ok", uid: 1, profile: await demoApi.login() } : { state: "code", kind: "sms", phone: "+7 *** *** ** 27", sid: "1" }),
-  browserReopen: () => wait(undefined),
-  browserCancel: () => wait(undefined),
   logout: () => wait(undefined),
   qrStart: () => wait({ url: "https://qr.vk.ru/ca?q=DEMO42", hash: "demo", expires_at: Date.now() / 1000 + 300 }),
   qrCheck: () => wait({ state: "waiting" as const, raw: 0 }),
@@ -65,6 +61,7 @@ export const demoApi: MusicApi = {
   recommendations: () => wait([...other, ...mine.slice(3)]),
   popular: (g) => wait(pick(g ?? 0, 12)),
   searchTracks: (q) => wait(rankTracks(all().filter((x) => coverage(q, `${x.artist} ${x.title}`) >= 0.5), { any: q })),
+  searchTracksFast: (q) => wait(rankTracks(all().filter((x) => coverage(q, `${x.artist} ${x.title}`) >= 0.5), { any: q })),
   searchExtras: (q) => {
     const names = [...new Set(all().flatMap(trackArtists))].filter((n) => coverage(q, n) >= 1 || coverage(n, q) >= 1);
     return wait({ playlists: pls.filter((p) => coverage(q, p.title) >= 0.5), artists: names.map((name) => ({ name })) });

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Plus } from "lucide-react";
 import { PlaylistGrid } from "../components/PlaylistGrid";
 import { Empty, Loading } from "../components/Loading";
@@ -12,14 +12,22 @@ export function Playlists() {
   const { t } = useSettings();
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
+  const cancelled = useRef(false);
+  const submitting = useRef(false);
 
   const create = async () => {
+    if (submitting.current) return;
+    submitting.current = true;
     const name = title.trim();
     setCreating(false);
     setTitle("");
-    if (!name) return;
-    const pl = await lib.createPlaylist(name);
-    if (pl) ui.navigate({ name: "playlist", playlist: pl });
+    try {
+      if (!name) return;
+      const pl = await lib.createPlaylist(name);
+      if (pl) ui.navigate({ name: "playlist", playlist: pl });
+    } finally {
+      submitting.current = false;
+    }
   };
 
   return (
@@ -34,8 +42,14 @@ export function Playlists() {
               placeholder={t("Название плейлиста")}
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") create(); if (e.key === "Escape") setCreating(false); }}
-              onBlur={create}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") create();
+                if (e.key === "Escape") { cancelled.current = true; setTitle(""); setCreating(false); }
+              }}
+              onBlur={() => {
+                if (cancelled.current) { cancelled.current = false; return; }
+                create();
+              }}
             />
           ) : (
             <button className="btn primary" onClick={() => setCreating(true)}>

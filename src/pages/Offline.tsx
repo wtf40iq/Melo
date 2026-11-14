@@ -55,7 +55,7 @@ export function Offline() {
           {list.map((pl, i) => (
             <div key={pl.id} className="card" style={{ ["--i" as string]: Math.min(i, 24) }} tabIndex={0}
               onClick={() => ui.navigate({ name: "offline-pl", id: pl.id })}
-              onKeyDown={(e) => e.key === "Enter" && ui.navigate({ name: "offline-pl", id: pl.id })}>
+              onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) ui.navigate({ name: "offline-pl", id: pl.id }); }}>
               <div className="card-cover">
                 <Cover seed={pl.title} src={pl.cover} radius={10} fill />
                 <span className="off-badge"><HardDrive size={13} /></span>

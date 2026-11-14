@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Compass, HardDrive, Home, Library, ListMusic, LogOut, Settings, UserPlus, X } from "lucide-react";
+import { Check, Compass, HardDrive, History, Home, Library, ListMusic, LogOut, Settings, UserPlus, X } from "lucide-react";
 import { useSettings } from "../store/settings";
 import { useLibrary } from "../store/library";
 import { usePlayer } from "../store/player";
@@ -10,6 +10,7 @@ import { Dialog } from "./Dialog";
 const nav = [
   { name: "home", label: "Главная", icon: Home },
   { name: "library", label: "Моя музыка", icon: Library },
+  { name: "history", label: "История", icon: History },
   { name: "playlists", label: "Плейлисты", icon: ListMusic },
   { name: "explore", label: "Обзор", icon: Compass },
 ] as const;

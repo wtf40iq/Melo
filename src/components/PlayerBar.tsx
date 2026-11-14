@@ -1,21 +1,26 @@
 import {
   Heart, ListMusic, Loader2, Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Volume1, Volume2, VolumeX,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { useLibrary } from "../store/library";
 import { usePlayer, usePlaybackPosition } from "../store/player";
 import { errorText, useUi } from "../store/ui";
-import { formatTime } from "../types";
+import { formatTime, isOffline } from "../types";
 import { Cover } from "./Cover";
 import { Visualizer } from "./Visualizer";
 import { EqPopover } from "./EqPanel";
 import { AntiBlur } from "./AntiBlur";
+import { SleepMenu } from "./SleepMenu";
 import { ArtistLinks } from "./ArtistLinks";
 import { useSettings } from "../store/settings";
 import { useT } from "../store/settings";
 import { Mic2, Radio, SlidersHorizontal } from "lucide-react";
 import { api } from "../api";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { PictureInPicture2 } from "lucide-react";
+import { inTauri } from "../api";
 
 function Slider({ value, max, onChange, label }: { value: number; max: number; onChange: (v: number) => void; label: string }) {
   const pct = max ? Math.min(100, (value / max) * 100) : 0;
@@ -47,10 +52,19 @@ export function PlayerBar() {
   const [eqOpen, setEqOpen] = useState(false);
   const eqBtn = useRef<HTMLButtonElement>(null);
   const [similarBusy, setSimilarBusy] = useState(false);
+  const [miniOpen, setMiniOpen] = useState(false);
+  useEffect(() => {
+    if (!inTauri) return;
+    let alive = true;
+    let off: (() => void) | undefined;
+    invoke<boolean>("mini_is_open").then((v) => alive && setMiniOpen(v)).catch(() => {});
+    listen<boolean>("mini-visibility", (e) => setMiniOpen(e.payload)).then((u) => { if (alive) off = u; else u(); });
+    return () => { alive = false; off?.(); };
+  }, []);
   // Похожее: текущий трек доигрывает, дальше в очереди — похожие
   const playSimilar = async () => {
     const cur = p.current;
-    if (!cur || similarBusy) return;
+    if (!cur || similarBusy || isOffline(cur)) return;
     setSimilarBusy(true);
     try {
       const list = await api.similar(cur);
@@ -78,6 +92,8 @@ export function PlayerBar() {
   const VolIcon = p.volume === 0 ? VolumeX : p.volume < 0.5 ? Volume1 : Volume2;
   const liked = t ? lib.isMine(t) : false;
   const [copied, setCopied] = useState(false);
+  const copyTimer = useRef(0);
+  useEffect(() => () => clearTimeout(copyTimer.current), []);
   const copy = async () => {
     if (!t) return;
     const text = `${t.artist} - ${t.title}`;
@@ -93,7 +109,8 @@ export function PlayerBar() {
     }
     setCopied(true);
     ui.toast("Скопировано: {text}", { text });
-    setTimeout(() => setCopied(false), 1500);
+    clearTimeout(copyTimer.current);
+    copyTimer.current = window.setTimeout(() => setCopied(false), 1500);
   };
 
   return (
@@ -102,7 +119,15 @@ export function PlayerBar() {
       <div className="now">
         {t && (
           <>
-            <div className="now-cover" key={`c-${t.id}`}>
+            <div
+              className="now-cover"
+              key={`c-${t.id}`}
+              role="button"
+              tabIndex={0}
+              aria-label={ui.nowOpen ? tr("Сейчас играет") : tr("Открыть «Сейчас играет»")}
+              onClick={() => ui.setNowOpen(true)}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); ui.setNowOpen(true); } }}
+            >
               <Cover seed={t.title + t.artist} src={t.cover} size={52} radius={8} />
             </div>
             <div className="now-text" key={`t-${t.id}`}>
@@ -119,14 +144,16 @@ export function PlayerBar() {
             >
               {copied ? <Check size={15} /> : <Copy size={15} />}
             </button>
-            <button
-              className={`icon-btn ${liked ? "liked" : ""}`}
-              onClick={() => lib.toggleMine(t)}
-              aria-label={tr(liked ? "Удалить из моей музыки" : "Добавить в мою музыку")}
+            {!isOffline(t) && (
+              <button
+                className={`icon-btn ${liked ? "liked" : ""}`}
+                onClick={() => lib.toggleMine(t)}
+                aria-label={tr(liked ? "Удалить из моей музыки" : "Добавить в мою музыку")}
                 data-tip={tr(liked ? "Удалить из моей музыки" : "Добавить в мою музыку")}
-            >
-              <Heart key={String(liked)} className={liked ? "heart-pop" : ""} size={18} fill={liked ? "currentColor" : "none"} />
-            </button>
+              >
+                <Heart key={String(liked)} className={liked ? "heart-pop" : ""} size={18} fill={liked ? "currentColor" : "none"} />
+              </button>
+            )}
           </>
         )}
       </div>
@@ -171,9 +198,11 @@ export function PlayerBar() {
             >
               <Mic2 size={18} />
             </button>
-            <button className={`icon-btn ${similarBusy ? "busy" : ""}`} onClick={playSimilar} aria-label={tr("Слушать похожее")} data-tip={tr("Слушать похожее")}>
-              {similarBusy ? <Loader2 size={18} className="spin" /> : <Radio size={18} />}
-            </button>
+            {!isOffline(t) && (
+              <button className={`icon-btn ${similarBusy ? "busy" : ""}`} onClick={playSimilar} aria-label={tr("Слушать похожее")} data-tip={tr("Слушать похожее")}>
+                {similarBusy ? <Loader2 size={18} className="spin" /> : <Radio size={18} />}
+              </button>
+            )}
             <AntiBlur />
           </>
         )}
@@ -187,26 +216,42 @@ export function PlayerBar() {
           <SlidersHorizontal size={18} />
         </button>
         <EqPopover open={eqOpen} onClose={() => setEqOpen(false)} anchor={eqBtn} />
+        <SleepMenu />
+        {inTauri && (
+          <button
+            className={`icon-btn ${miniOpen ? "on" : ""}`}
+            onClick={() => { invoke(miniOpen ? "mini_hide" : "mini_show").catch(() => {}); }}
+            aria-label={tr("Мини-плеер")}
+            data-tip={tr("Мини-плеер")}
+          >
+            <PictureInPicture2 size={18} />
+          </button>
+        )}
         <button className={`icon-btn ${ui.queueOpen ? "on" : ""}`} onClick={() => ui.setQueueOpen(!ui.queueOpen)} aria-label={tr("Очередь")} data-tip={tr("Очередь")}>
           <ListMusic size={19} />
         </button>
-        <button
-          className="icon-btn"
-          onClick={() => {
-            if (p.volume) { lastVol.current = p.volume; p.setVolume(0); } else p.setVolume(lastVol.current || 0.7);
-          }}
-          aria-label={tr("Звук")}
-        >
-          <VolIcon size={19} />
-        </button>
         <div
-          className="volume vol-wrap"
+          className="vol-control"
           style={{ ["--pct" as string]: `${p.volume * 100}%` }}
           onWheel={(e) => { p.setVolume(Math.round(Math.max(0, Math.min(1, p.volume - Math.sign(e.deltaY) * 0.02)) * 100) / 100); flashVol(); }}
-          onPointerDown={() => { setVolDrag(true); window.addEventListener("pointerup", () => setVolDrag(false), { once: true }); }}
         >
-          <Slider value={p.volume} max={1} onChange={(v) => { p.setVolume(v); flashVol(); }} label={tr("Громкость")} />
-          {(volDrag || volFlash) && <span className="vol-bubble">{Math.round(p.volume * 100)}%</span>}
+          <button
+            className="icon-btn"
+            onClick={() => {
+              if (p.volume) { lastVol.current = p.volume; p.setVolume(0); } else p.setVolume(lastVol.current || 0.7);
+            }}
+            aria-label={tr("Звук")}
+            data-tip={tr("Громкость")}
+          >
+            <VolIcon size={19} />
+          </button>
+          <div
+            className="vol-pop"
+            onPointerDown={() => { setVolDrag(true); window.addEventListener("pointerup", () => setVolDrag(false), { once: true }); }}
+          >
+            <Slider value={p.volume} max={1} onChange={(v) => { p.setVolume(v); flashVol(); }} label={tr("Громкость")} />
+            {(volDrag || volFlash) && <span className="vol-bubble">{Math.round(p.volume * 100)}%</span>}
+          </div>
         </div>
       </div>
     </footer>

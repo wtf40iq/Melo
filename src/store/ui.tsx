@@ -5,6 +5,7 @@ export type Route =
   | { name: "home" }
   | { name: "library" }
   | { name: "playlists" }
+  | { name: "history" }
   | { name: "explore" }
   | { name: "settings" }
   | { name: "playlist"; playlist: Playlist }
@@ -31,10 +32,13 @@ type UiState = {
   setQueueOpen: (v: boolean) => void;
   lyricsOpen: boolean;
   setLyricsOpen: (v: boolean) => void;
+  nowOpen: boolean;
+  setNowOpen: (v: boolean) => void;
   toast: (text: string, params?: ToastParams, opts?: ToastOptions) => void;
   dismissToast: (id: number) => void;
 };
 
+const HISTORY_MAX = 60;
 const Ctx = createContext<UiState | null>(null);
 const ToastCtx = createContext<{ toasts: Toast[]; dismissToast: (id: number) => void } | null>(null);
 export const useToasts = () => {
@@ -48,7 +52,7 @@ const same = (a: Route, b: Route) =>
   (a.name !== "artist" || (b.name === "artist" && (a.artist.id ?? a.artist.name) === (b.artist.id ?? b.artist.name))) &&
   (a.name !== "offline-pl" || (b.name === "offline-pl" && a.id === b.id)) &&
   (a.name !== "mix" || (b.name === "mix" && a.id === b.id)) &&
-  a.name !== "deep";
+  (a.name !== "deep" || (b.name === "deep" && a.artist === b.artist && a.title === b.title));
 
 export function UiProvider({ children }: { children: ReactNode }) {
   const [history, setHistory] = useState<Route[]>([{ name: "home" }]);
@@ -56,6 +60,7 @@ export function UiProvider({ children }: { children: ReactNode }) {
   const [query, setQuery] = useState("");
   const [queueOpen, setQueueOpenRaw] = useState(false);
   const [lyricsOpen, setLyricsOpenRaw] = useState(false);
+  const [nowOpen, setNowOpen] = useState(false);
   // Очередь и текст песни открываются на одном месте справа — одно закрывает другое
   const setQueueOpen = useCallback((v: boolean) => { setQueueOpenRaw(v); if (v) setLyricsOpenRaw(false); }, []);
   const setLyricsOpen = useCallback((v: boolean) => { setLyricsOpenRaw(v); if (v) setQueueOpenRaw(false); }, []);
@@ -84,8 +89,12 @@ export function UiProvider({ children }: { children: ReactNode }) {
     navigate: (r) => {
       setQuery("");
       if (same(r, route)) return;
-      setHistory((h) => [...h.slice(0, pos + 1), r]);
-      setPos(pos + 1);
+      setHistory((h) => {
+        const next = [...h.slice(0, pos + 1), r];
+        // Долгая сессия не должна копить историю бесконечно
+        return next.length > HISTORY_MAX ? next.slice(next.length - HISTORY_MAX) : next;
+      });
+      setPos((p) => Math.min(p + 1, HISTORY_MAX - 1));
     },
     back: () => { setQuery(""); setPos((p) => Math.max(0, p - 1)); },
     forward: () => { setQuery(""); setPos((p) => Math.min(history.length - 1, p + 1)); },
@@ -95,9 +104,11 @@ export function UiProvider({ children }: { children: ReactNode }) {
     setQueueOpen,
     lyricsOpen,
     setLyricsOpen,
+    nowOpen,
+    setNowOpen,
     toast,
     dismissToast,
-  }), [route, history, pos, query, queueOpen, lyricsOpen, setQueueOpen, setLyricsOpen, toast, dismissToast]);
+  }), [route, history, pos, query, queueOpen, lyricsOpen, nowOpen, setQueueOpen, setLyricsOpen, toast, dismissToast]);
   const notices = useMemo(() => ({ toasts, dismissToast }), [toasts, dismissToast]);
   return <Ctx.Provider value={value}><ToastCtx.Provider value={notices}>{children}</ToastCtx.Provider></Ctx.Provider>;
 }

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { api } from "../api";
 import { usePlayer } from "../store/player";
 import { useSettings } from "../store/settings";
+import { useUi } from "../store/ui";
 import { Stars } from "./Stars";
 import { FireCursor } from "./FireCursor";
 import { onVisualActivity, visualsActive } from "../visualActivity";
@@ -38,6 +39,8 @@ const hexToHsl = (hex: string): [number, number, number] => {
 };
 
 const MONO = "#dfe3ea";
+/** Обложка приходит извне: кавычки и переводы строк не должны ломать CSS url(). */
+const cssUrl = (u: string) => `url("${u.replace(/["\\\n\r]/g, "")}")`;
 
 /** Главный «живой» цвет обложки: самый весомый оттенок, яркий и насыщенный для акцента. */
 const colorCache = new Map<string, Promise<string | null>>();
@@ -51,7 +54,11 @@ function dominantColor(src: string): Promise<string | null> {
   return result;
 }
 async function extractColor(src: string): Promise<string | null> {
-  const tries = inTauri && src.startsWith("http") ? [await api.streamUrl(src), src] : [src];
+  let proxy: string | null = null;
+  if (inTauri && src.startsWith("http")) {
+    try { proxy = await api.streamUrl(src); } catch { /* ниже попробуем исходный адрес */ }
+  }
+  const tries = proxy ? [proxy, src] : [src];
   for (const url of tries) {
     try {
       const img = await loadImage(url);
@@ -111,19 +118,31 @@ async function extractColor(src: string): Promise<string | null> {
 export function Effects() {
   const s = useSettings();
   const p = usePlayer();
+  const ui = useUi();
   const glow = useRef<HTMLDivElement>(null);
   const [coverColor, setCoverColor] = useState<string | null>(null);
+  const [pulse, setPulse] = useState(0);
+  const firstPulse = useRef(true);
   const cover = p.current?.cover;
+
+  // Переход между вкладками подталкивает живой фон: звёзды ускоряются,
+  // а поверх остальных фонов проходит мягкая волна света.
+  useEffect(() => {
+    if (firstPulse.current) { firstPulse.current = false; return; }
+    setPulse((n) => n + 1);
+    window.dispatchEvent(new Event("melo:bg-pulse"));
+  }, [ui.route]);
 
   // Классы и переменные на <html>
   useEffect(() => {
     const root = document.documentElement;
+    root.dataset.theme = s.theme;
     root.classList.toggle("glass", s.glass !== "off");
     root.classList.toggle("fx-bg", s.bgEffect !== "none" || s.glass !== "off");
     root.classList.toggle("vinyl", s.vinyl);
     root.dataset.radius = s.radius;
     root.style.setProperty("--glass-a", String(s.glassOpacity));
-  }, [s.glass, s.bgEffect, s.vinyl, s.radius, s.glassOpacity]);
+  }, [s.theme, s.glass, s.bgEffect, s.vinyl, s.radius, s.glassOpacity]);
 
   // Масштаб интерфейса — встроенным зумом окна, чтобы координаты мыши не ломались
   useEffect(() => {
@@ -147,7 +166,7 @@ export function Effects() {
   useEffect(() => {
     let alive = true;
     if (!cover || (!s.dynamicAccent && s.bgEffect !== "cover")) return setCoverColor(null);
-    dominantColor(cover).then((c) => alive && setCoverColor(c));
+    dominantColor(cover).then((c) => alive && setCoverColor(c)).catch(() => { if (alive) setCoverColor(null); });
     return () => { alive = false; };
   }, [cover, s.dynamicAccent, s.bgEffect]);
 
@@ -287,9 +306,12 @@ export function Effects() {
         <div className={`fx-bg-layer fx-${s.bgEffect}`} aria-hidden>
           {s.bgEffect === "aurora" && <><i /><i /><i /><i /></>}
           {s.bgEffect === "cover" && cover && (
-            <div key={cover} className="fx-cover" style={{ backgroundImage: `url("${cover}")`, ["--cc" as string]: coverColor ?? "var(--accent)" }} />
+            <div key={cover} className="fx-cover" style={{ backgroundImage: cssUrl(cover), ["--cc" as string]: coverColor ?? "var(--accent)" }} />
           )}
           {s.bgEffect === "stars" && <Stars />}
+          {pulse > 0 && s.bgEffect !== "stars" && (
+            <div key={pulse} className={`fx-kick fx-kick-${s.bgEffect}`} />
+          )}
         </div>
       )}
       {s.cursorGlow && (

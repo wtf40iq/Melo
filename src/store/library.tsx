@@ -1,8 +1,9 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState, useRef } from "react";
 import { api } from "../api";
 import { Account } from "../api/types";
-import { Playlist, Profile, Track, trackKey } from "../types";
+import { isOffline, Playlist, Profile, Track, trackKey } from "../types";
 import { errorText, useUi } from "./ui";
+import { readLibrary, writeLibrary } from "./cache";
 
 type LibraryState = {
   profile: Profile | null;
@@ -19,6 +20,8 @@ type LibraryState = {
   playlists: Playlist[];
   playlistsLoading: boolean;
   reloadPlaylists: () => void;
+  /** Перезагрузить треки и плейлисты (например, после продления входа). */
+  reloadLibrary: () => void;
   isMine: (t: Track) => boolean;
   toggleMine: (t: Track) => Promise<void>;
   createPlaylist: (title: string) => Promise<Playlist | null>;
@@ -43,7 +46,7 @@ const PAGE = 200;
 /** Почему ВК завершил сессию — показываем на экране входа. */
 export function rememberVkKick(e: string) {
   const msg = e.replace(/^.*not_authorized:?\s*/, "").trim();
-  localStorage.setItem("melo.vkKick", JSON.stringify({ at: Date.now(), msg }));
+  try { localStorage.setItem("melo.vkKick", JSON.stringify({ at: Date.now(), msg })); } catch { /* ignore */ }
 }
 export function lastVkKick(): string | null {
   try {
@@ -91,7 +94,15 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       try {
         const page = await api.myTracks(offset, PAGE);
         if (gen !== generation.current) return;
-        setTracks((prev) => (offset === 0 ? page.items : [...prev, ...page.items]));
+        setTracks((prev) => {
+          if (offset === 0) {
+            if (!prev.length) return page.items;
+            const ids = new Set(page.items.map((x) => x.id));
+            return [...page.items, ...prev.filter((x) => !ids.has(x.id))];
+          }
+          const ids = new Set(prev.map((x) => x.id));
+          return [...prev, ...page.items.filter((x) => !ids.has(x.id))];
+        });
         setTotal(page.total);
       } catch (e) {
         if (gen === generation.current) fail(e);
@@ -120,16 +131,30 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     reloadAccounts();
-    generation.current++;
+    const gen = ++generation.current;
     loadingPage.current = false;
     if (!profile) return;
     localStorage.removeItem("melo.vkKick");
     setReturnTo(null);
     setTracks([]);
     setTotal(0);
-    loadPage(0);
+    // Сначала показываем сохранённую библиотеку, затем тихо обновляем первую страницу.
+    void readLibrary(profile.id).then((cache) => {
+      if (gen !== generation.current) return;
+      if (cache) {
+        setTracks(cache.tracks);
+        setTotal(cache.total);
+      }
+      loadPage(0);
+    });
     reloadPlaylists();
   }, [profile, loadPage, reloadPlaylists, reloadAccounts]);
+
+  useEffect(() => {
+    if (!profile || !tracks.length) return;
+    const id = window.setTimeout(() => { void writeLibrary(profile.id, tracks, total); }, 700);
+    return () => clearTimeout(id);
+  }, [profile?.id, tracks, total]);
 
   const clear = () => {
     generation.current++;
@@ -148,7 +173,11 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       clear();
       const acc = await api.accounts().catch(() => [] as Account[]);
       const account = acc.find((a) => a.user_id === userId);
-      setProfile(account ? { id: userId, name: account.name ?? `id${userId}`, photo: account.photo ?? undefined } : null);
+      // Переключение уже состоялось в Rust. Если список аккаунтов почему-то не пришёл,
+      // не показываем экран входа — работаем с новым id и подтянем имя позже.
+      setProfile(account
+        ? { id: userId, name: account.name ?? `id${userId}`, photo: account.photo ?? undefined }
+        : { id: userId, name: `id${userId}` });
     } catch (e) {
       fail(e);
     }
@@ -156,11 +185,12 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
 
   const mineKeys = useMemo(() => new Map(tracks.map((t) => [trackKey(t), t])), [tracks]);
   const isMine = useCallback(
-    (t: Track) => (profile ? t.ownerId === profile.id : false) || mineKeys.has(trackKey(t)),
+    (t: Track) => !isOffline(t) && ((profile ? t.ownerId === profile.id : false) || mineKeys.has(trackKey(t))),
     [profile, mineKeys],
   );
 
   const toggleMine = async (t: Track) => {
+    if (isOffline(t)) return;
     try {
       if (isMine(t)) {
         const copy = profile && t.ownerId === profile.id ? t : mineKeys.get(trackKey(t));
@@ -197,6 +227,15 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       fail(e);
     }
   };
+
+  const reloadLibrary = useCallback(() => {
+    generation.current++;
+    loadingPage.current = false;
+    setTracks([]);
+    setTotal(0);
+    loadPage(0);
+    reloadPlaylists();
+  }, [loadPage, reloadPlaylists]);
 
   const value: LibraryState = useMemo(() => ({
     profile,
@@ -249,15 +288,18 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
       setProfile(await api.login().catch(() => null));
     },
     moveTrack: async (from, to) => {
-      if (from === to) return;
-      const next = [...tracks];
+      if (from === to || from < 0 || from >= tracks.length) return;
+      const before = tracks;
+      const next = [...before];
       const [t] = next.splice(from, 1);
-      next.splice(to, 0, t);
+      if (!t) return;
+      const at = Math.max(0, Math.min(to, next.length));
+      next.splice(at, 0, t);
       setTracks(next);
       try {
-        await api.reorder(t, to > 0 ? next[to - 1] : undefined, to < next.length - 1 ? next[to + 1] : undefined);
+        await api.reorder(t, at > 0 ? next[at - 1] : undefined, at < next.length - 1 ? next[at + 1] : undefined);
       } catch (e) {
-        setTracks(tracks); // вернуть как было
+        setTracks(before); // вернуть ровно то, что было до перемещения
         fail(e);
       }
     },
@@ -270,6 +312,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
     playlists,
     playlistsLoading,
     reloadPlaylists,
+    reloadLibrary,
     isMine,
     toggleMine,
     createPlaylist: async (title) => {
@@ -302,7 +345,7 @@ export function LibraryProvider({ children }: { children: ReactNode }) {
         return false;
       }
     },
-  }), [profile, booting, tracks, total, loadingTracks, playlists, playlistsLoading, accounts, returnTo, fail, toast, isMine, reloadAccounts, reloadPlaylists, loadPage]);
+  }), [profile, booting, tracks, total, loadingTracks, playlists, playlistsLoading, accounts, returnTo, fail, toast, isMine, reloadAccounts, reloadPlaylists, reloadLibrary, loadPage]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

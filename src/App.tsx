@@ -1,20 +1,28 @@
 import { useEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { Welcome } from "./pages/Welcome";
 import { UpdateProvider } from "./store/update";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { PlayerBar } from "./components/PlayerBar";
+import { NowPlaying } from "./components/NowPlaying";
+import { MiniBridge } from "./components/MiniBridge";
+import { DiscordBridge } from "./components/DiscordBridge";
+import { NewReleases } from "./components/NewReleases";
+import { GlobalHotkeys } from "./components/GlobalHotkeys";
 import { QueuePanel } from "./components/QueuePanel";
 import { LyricsPanel } from "./components/LyricsPanel";
 import { Toasts } from "./components/Toasts";
 import { Tooltip } from "./components/Tooltip";
 import { Effects } from "./components/Effects";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { RenewSession } from "./components/RenewSession";
 import { OfflineDrop } from "./components/OfflineDrop";
 import { Home } from "./pages/Home";
 import { Playlists } from "./pages/Playlists";
 import { Library } from "./pages/Library";
+import { History } from "./pages/History";
 import { Explore } from "./pages/Explore";
 import { PlaylistPage } from "./pages/PlaylistPage";
 import { SearchPage } from "./pages/SearchPage";
@@ -40,10 +48,22 @@ function Shell() {
   const r = ui.route;
   // Первый запуск — приветствие (его можно открыть снова из настроек)
   const [welcome, setWelcome] = useState(() => !localStorage.getItem("melo.onboarded"));
+  // Свёрнутое/убранное в трей окно не держит в памяти страницы, обложки и canvas.
+  const [background, setBackground] = useState(() => document.hidden);
   useEffect(() => {
     const on = () => setWelcome(true);
     window.addEventListener("melo:welcome", on);
     return () => window.removeEventListener("melo:welcome", on);
+  }, []);
+  useEffect(() => {
+    const onBg = (e: Event) => setBackground(!!(e as CustomEvent<boolean>).detail);
+    const onVis = () => setBackground(document.hidden);
+    window.addEventListener("melo:background", onBg);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("melo:background", onBg);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, []);
 
   useEffect(() => {
@@ -68,8 +88,8 @@ function Shell() {
       else if (e.code === "Space") { e.preventDefault(); player.toggle(); }
       else if (e.ctrlKey && e.code === "ArrowRight") player.next();
       else if (e.ctrlKey && e.code === "ArrowLeft") player.prev();
-      else if (e.code === "ArrowRight") player.seek(Math.min(player.duration, player.position + 5));
-      else if (e.code === "ArrowLeft") player.seek(Math.max(0, player.position - 5));
+      else if (e.code === "ArrowRight") player.seekBy(5);
+      else if (e.code === "ArrowLeft") player.seekBy(-5);
       else if (e.code === "ArrowUp") { e.preventDefault(); player.setVolume(Math.min(1, player.volume + 0.05)); }
       else if (e.code === "ArrowDown") { e.preventDefault(); player.setVolume(Math.max(0, player.volume - 0.05)); }
     };
@@ -79,6 +99,7 @@ function Shell() {
 
   // После выхода останавливаем музыку
   useEffect(() => {
+    ui.setNowOpen(false);
     player.stop();
     if (lib.profile) player.restore(lib.profile.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -112,12 +133,34 @@ function Shell() {
     import("@tauri-apps/api/core").then(({ invoke }) => invoke("set_close_to_tray", { value: settings.closeToTray }).catch(() => {}));
   }, [settings.closeToTray]);
 
+  if (background) {
+    return (
+      <div className="app app-bg">
+        <MiniBridge />
+        <DiscordBridge />
+        <GlobalHotkeys />
+      </div>
+    );
+  }
+
   if (welcome) {
     return (
       <div className="app logged-out">
         <TitleBar query="" onQuery={() => {}} canBack={false} canForward={false} onBack={() => {}} onForward={() => {}} showSearch={false} />
         <Effects />
         <Welcome onDone={() => { localStorage.setItem("melo.onboarded", "1"); setWelcome(false); }} />
+      </div>
+    );
+  }
+
+  if (lib.booting) {
+    return (
+      <div className="app logged-out">
+        <TitleBar query="" onQuery={() => {}} canBack={false} canForward={false} onBack={() => {}} onForward={() => {}} showSearch={false} />
+        <Effects />
+        <div style={{ display: "grid", placeItems: "center", height: "100%" }}>
+          <Loader2 className="spin" size={30} />
+        </div>
       </div>
     );
   }
@@ -138,6 +181,7 @@ function Shell() {
     if (ui.query.trim()) return <SearchPage query={ui.query} />;
     if (r.name === "home") return <Home />;
     if (r.name === "library") return <Library />;
+    if (r.name === "history") return <History />;
     if (r.name === "playlists") return <Playlists />;
     if (r.name === "explore") return <Explore />;
     if (r.name === "settings") return <Settings />;
@@ -151,12 +195,21 @@ function Shell() {
 
   return (
     <div className="app app-in">
+      <MiniBridge />
+      <DiscordBridge />
+      <NewReleases />
+      <GlobalHotkeys />
       <Effects />
       <OfflineDrop />
       <TitleBar
         query={ui.query}
         onQuery={ui.setQuery}
-        onDeep={() => ui.navigate({ name: "deep" })}
+        onDeep={() => {
+          const q = ui.query.trim();
+          const parts = q.split(/\s+[-–—]+\s+/);
+          if (parts.length >= 2) ui.navigate({ name: "deep", artist: parts[0], title: parts.slice(1).join(" - ") });
+          else ui.navigate({ name: "deep", title: q || undefined });
+        }}
         canBack={ui.canBack}
         canForward={ui.canForward}
         onBack={ui.back}
@@ -164,13 +217,14 @@ function Shell() {
       />
       <Sidebar />
       <main className="main" ref={mainRef}>
-        <div className="page-anim" key={ui.query.trim() ? "search" : r.name === "playlist" ? `pl-${r.playlist.id}` : r.name === "artist" ? `ar-${r.artist.id ?? r.artist.name}` : r.name === "offline-pl" ? `off-${r.id}` : r.name}>
+        <div className="page-anim" key={ui.query.trim() ? "search" : r.name === "playlist" ? `pl-${r.playlist.id}` : r.name === "artist" ? `ar-${r.artist.id ?? r.artist.name}` : r.name === "offline-pl" ? `off-${r.id}` : r.name === "deep" ? `deep-${r.artist ?? ""}-${r.title ?? ""}` : r.name}>
           {page()}
         </div>
       </main>
       <QueuePanel />
       <LyricsPanel />
       <PlayerBar />
+      {ui.nowOpen && <NowPlaying />}
       <Toasts />
       <Tooltip />
     </div>
@@ -179,18 +233,20 @@ function Shell() {
 
 export default function App() {
   return (
-    <SettingsProvider>
-      <UiProvider>
-        <LibraryProvider>
-          <PlayerProvider>
-            <UpdateProvider>
-              <Shell />
-              <UpdateDialog />
-              <RenewSession />
-            </UpdateProvider>
-          </PlayerProvider>
-        </LibraryProvider>
-      </UiProvider>
-    </SettingsProvider>
+    <ErrorBoundary>
+      <SettingsProvider>
+        <UiProvider>
+          <LibraryProvider>
+            <PlayerProvider>
+              <UpdateProvider>
+                <Shell />
+                <UpdateDialog />
+                <RenewSession />
+              </UpdateProvider>
+            </PlayerProvider>
+          </LibraryProvider>
+        </UiProvider>
+      </SettingsProvider>
+    </ErrorBoundary>
   );
 }

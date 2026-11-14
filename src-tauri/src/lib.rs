@@ -3,11 +3,14 @@
 use std::{
     collections::HashMap,
     fs,
+    io::Read,
+    net::ToSocketAddrs,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 
+mod discord;
 mod offline;
 mod vkweb;
 
@@ -29,6 +32,81 @@ const VKA_SECRET: &str = "hHbZxrka2uZ6jB1inYsH";
 const VKA_UA: &str = "VKAndroidApp/8.52-14102 (Android 13; SDK 33; arm64-v8a; Google Pixel 5; ru; 2400x1080; No Cellular)";
 const API_VERSION: &str = "5.131";
 const REDIRECT: &str = "https://oauth.vk.com/blank.html";
+
+/// Блокировка без паники: если поток упал, держа мьютекс, состояние всё равно
+/// остаётся доступным — приложение продолжает работать.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Файлы с токенами и cookies шифруются DPAPI: ключ привязан к учётной записи
+/// Windows, поэтому скопированный на другой ПК файл прочитать нельзя.
+const SEALED_MAGIC: &[u8] = b"MELO1";
+
+#[cfg(windows)]
+fn dpapi(data: &[u8], protect: bool) -> Option<Vec<u8>> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{
+        CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
+    };
+
+    let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
+    let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+    let ok = unsafe {
+        if protect {
+            CryptProtectData(
+                &input,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        } else {
+            CryptUnprotectData(
+                &input,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                CRYPTPROTECT_UI_FORBIDDEN,
+                &mut out,
+            )
+        }
+    };
+    if ok == 0 || out.pbData.is_null() {
+        return None;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize) }.to_vec();
+    unsafe { LocalFree(out.pbData as *mut core::ffi::c_void) };
+    Some(bytes)
+}
+
+#[cfg(not(windows))]
+fn dpapi(data: &[u8], _protect: bool) -> Option<Vec<u8>> {
+    Some(data.to_vec())
+}
+
+pub(crate) fn seal(data: &[u8]) -> Vec<u8> {
+    match dpapi(data, true) {
+        Some(enc) => {
+            let mut v = SEALED_MAGIC.to_vec();
+            v.extend_from_slice(&enc);
+            v
+        }
+        // DPAPI недоступен — лучше сохранить вход открытым, чем потерять его
+        None => data.to_vec(),
+    }
+}
+
+pub(crate) fn unseal(data: &[u8]) -> Option<Vec<u8>> {
+    match data.strip_prefix(SEALED_MAGIC) {
+        Some(rest) => dpapi(rest, false),
+        // Старые файлы без магии — обычный JSON
+        None => Some(data.to_vec()),
+    }
+}
 
 fn default_client() -> String {
     "kate".into()
@@ -81,6 +159,9 @@ impl Session {
 struct AppState {
     session: Mutex<Option<Session>>,
     http: reqwest::Client,
+    /// Отдельный клиент для локального прокси: без автоматических редиректов,
+    /// чтобы публичный URL не мог перенаправить запрос в localhost/локальную сеть.
+    proxy_http: reqwest::Client,
     /// Анонимный токен для QR-входа: (токен, когда получен)
     anon: Mutex<Option<(String, std::time::Instant)>>,
     /// Адрес локального сервера для музыки, например http://127.0.0.1:51234/abc/
@@ -124,7 +205,7 @@ fn portable_root() -> Option<PathBuf> {
 fn data_root() -> &'static PathBuf {
     DATA_ROOT.get_or_init(|| {
         portable_root()
-            .or_else(|| legacy_roaming())
+            .or_else(legacy_roaming)
             .unwrap_or_else(|| PathBuf::from("."))
     })
 }
@@ -197,6 +278,7 @@ struct Accounts {
 fn read_accounts(app: &AppHandle, name: &str) -> Option<Accounts> {
     data_path(app, name)
         .and_then(|p| fs::read(p).ok())
+        .and_then(|d| unseal(&d))
         .and_then(|d| serde_json::from_slice::<Accounts>(&d).ok())
 }
 
@@ -209,6 +291,7 @@ fn load_accounts(app: &AppHandle) -> Accounts {
     // Переезд со старого формата (один аккаунт в session.json)
     let old: Option<Session> = data_path(app, "session.json")
         .and_then(|p| fs::read(p).ok())
+        .and_then(|d| unseal(&d))
         .and_then(|d| serde_json::from_slice(&d).ok());
     match old {
         Some(s) => Accounts { active: Some(s.user_id), accounts: vec![s] },
@@ -224,16 +307,17 @@ fn store_accounts(app: &AppHandle, acc: &Accounts) {
     let data = serde_json::to_vec_pretty(acc).unwrap_or_default();
     // Атомарная запись: сначала во временный файл, потом замена. Прошлую версию храним как .bak
     let tmp = path.with_extension("json.tmp");
-    if fs::write(&tmp, &data).is_ok() {
+    let sealed = seal(&data);
+    if fs::write(&tmp, &sealed).is_ok() {
         if path.exists() {
             let _ = fs::copy(&path, path.with_extension("json.bak"));
         }
         if fs::rename(&tmp, &path).is_err() {
-            let _ = fs::write(&path, &data);
+            let _ = fs::write(&path, &sealed);
             let _ = fs::remove_file(&tmp);
         }
     } else {
-        let _ = fs::write(&path, &data);
+        let _ = fs::write(&path, &sealed);
     }
     if let Some(old) = data_path(app, "session.json") {
         let _ = fs::remove_file(old);
@@ -301,7 +385,7 @@ fn account_switch(app: AppHandle, state: State<'_, AppState>, user_id: i64) -> R
     let s = acc.accounts.iter().find(|a| a.user_id == user_id).cloned().ok_or("Аккаунт не найден")?;
     acc.active = Some(user_id);
     store_accounts(&app, &acc);
-    *state.session.lock().unwrap() = Some(s);
+    *lock(&state.session) = Some(s);
     SESSION_EXPIRED.store(false, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
@@ -314,9 +398,13 @@ fn account_remove(app: AppHandle, state: State<'_, AppState>, user_id: i64) {
     let _ = fs::remove_file(vkweb::cookies_path(data_root(), user_id));
     if acc.active == Some(user_id) {
         acc.active = None;
-        *state.session.lock().unwrap() = None;
+        *lock(&state.session) = None;
     }
     store_accounts(&app, &acc);
+    // И в резервной копии не должно остаться токена удалённого аккаунта.
+    if let Some(p) = data_path(&app, "accounts.json") {
+        let _ = fs::copy(&p, p.with_extension("json.bak"));
+    }
 }
 
 /// Запоминает имя и аватар активного аккаунта — для переключателя.
@@ -337,7 +425,7 @@ fn account_detach(app: AppHandle, state: State<'_, AppState>) {
     let mut acc = load_accounts(&app);
     acc.active = None;
     store_accounts(&app, &acc);
-    *state.session.lock().unwrap() = None;
+    *lock(&state.session) = None;
 }
 
 #[derive(Serialize)]
@@ -354,10 +442,114 @@ fn app_info(app: AppHandle, state: State<'_, AppState>) -> AppInfo {
     AppInfo {
         version: app.package_info().version.to_string(),
         data_dir: data_root().display().to_string(),
-        stream: state.stream_base.lock().unwrap().split('/').nth(2).unwrap_or_default().to_string(),
-        client: state.session.lock().unwrap().as_ref().map(|s| s.client.clone()),
+        stream: lock(&state.stream_base).split('/').nth(2).unwrap_or_default().to_string(),
+        client: lock(&state.session).as_ref().map(|s| s.client.clone()),
         api_version: API_VERSION.into(),
     }
+}
+
+const AUTOSTART_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+#[cfg(windows)]
+fn run_reg(args: &[&str]) -> Result<bool, String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("reg")
+        .args(args)
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .output()
+        .map_err(|e| e.to_string())?;
+    Ok(out.status.success())
+}
+
+#[tauri::command]
+fn autostart_get() -> bool {
+    #[cfg(windows)]
+    {
+        run_reg(&["query", AUTOSTART_KEY, "/v", "Melo"]).unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+/// Добавляет/убирает Melo из автозапуска Windows. Запуск идёт свёрнутым в трей.
+#[tauri::command]
+fn autostart_set(value: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if value {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let cmd = format!("\"{}\" --minimized", exe.display());
+            if run_reg(&["add", AUTOSTART_KEY, "/v", "Melo", "/t", "REG_SZ", "/d", &cmd, "/f"])? {
+                Ok(())
+            } else {
+                Err("Не удалось включить автозапуск".into())
+            }
+        } else {
+            let _ = run_reg(&["delete", AUTOSTART_KEY, "/v", "Melo", "/f"]);
+            Ok(())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = value;
+        Err("Автозапуск поддерживается только в Windows".into())
+    }
+}
+
+#[tauri::command]
+async fn offline_download(
+    state: State<'_, AppState>,
+    url: String,
+    playlist_id: String,
+    title: String,
+    artist: String,
+    cover: Option<String>,
+) -> Result<String, String> {
+    offline::download(&state.http, &url, &playlist_id, &title, &artist, cover.as_deref()).await
+}
+
+/// Сохранить текст в файл через системный диалог (M3U и т. п.).
+#[tauri::command]
+async fn save_text_file(app: AppHandle, default_name: String, content: String) -> Result<bool, String> {
+    let Some(file) = rfd::AsyncFileDialog::new()
+        .set_parent(&app.get_webview_window("main").ok_or("нет окна")?)
+        .set_file_name(&default_name)
+        .save_file()
+        .await
+    else {
+        return Ok(false);
+    };
+    std::fs::write(file.path(), content).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// Открывает ссылку в системном браузере (только VK, только https).
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    let u = Url::parse(&url).map_err(|_| "Некорректная ссылка")?;
+    if u.scheme() != "https" {
+        return Err("Разрешены только https-ссылки".into());
+    }
+    let host = u.host_str().unwrap_or_default().to_ascii_lowercase();
+    if !(host == "vk.com" || host.ends_with(".vk.com") || host == "vk.ru" || host.ends_with(".vk.ru")) {
+        return Err("Разрешены только ссылки ВКонтакте".into());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", &url])
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open").arg(&url).spawn().map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Достаёт токен из адреса вида https://oauth.vk.com/blank.html#access_token=...&user_id=...
@@ -390,7 +582,7 @@ fn parse_redirect(u: &Url) -> Option<Result<Session, String>> {
 type Reply = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<Session, String>>>>>;
 
 fn reply(tx: &Reply, value: Result<Session, String>) {
-    if let Some(t) = tx.lock().unwrap().take() {
+    if let Some(t) = lock(tx).take() {
         let _ = t.send(value);
     }
 }
@@ -443,7 +635,7 @@ async fn vk_login(app: AppHandle, state: State<'_, AppState>, fresh: Option<bool
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(400)).await;
-            if tx_poll.lock().unwrap().is_none() {
+            if lock(&tx_poll).is_none() {
                 break;
             }
             match poll_win.url() {
@@ -458,30 +650,56 @@ async fn vk_login(app: AppHandle, state: State<'_, AppState>, fresh: Option<bool
         }
     });
 
-    let result = rx.await.unwrap_or_else(|_| Err("Вход отменён".into()));
+    // Окно может зависнуть — не ждём вечно
+    let result = match tokio::time::timeout(Duration::from_secs(900), rx).await {
+        Ok(r) => r.unwrap_or_else(|_| Err("Вход отменён".into())),
+        Err(_) => Err("Время входа истекло — попробуйте ещё раз".into()),
+    };
     if let Some(w) = app.get_webview_window("vk-auth") {
         let _ = w.close();
     }
     let session = result?;
     let uid = session.user_id;
     save_session(&app, Some(&session));
-    *state.session.lock().unwrap() = Some(session);
+    *lock(&state.session) = Some(session);
     Ok(uid)
 }
 
 #[tauri::command]
 fn vk_session(state: State<'_, AppState>) -> Option<i64> {
-    state.session.lock().unwrap().as_ref().map(|s| s.user_id)
+    lock(&state.session).as_ref().map(|s| s.user_id)
 }
 
 #[tauri::command]
 fn vk_logout(app: AppHandle, state: State<'_, AppState>) {
     SESSION_EXPIRED.store(false, std::sync::atomic::Ordering::Relaxed);
-    if let Some(uid) = state.session.lock().unwrap().as_ref().map(|s| s.user_id) {
+    let uid = lock(&state.session).as_ref().map(|s| s.user_id);
+    if let Some(uid) = uid {
         let _ = fs::remove_file(vkweb::cookies_path(data_root(), uid));
+        // Выход должен действительно удалять сохранённый вход, иначе токен
+        // остаётся на диске и аккаунт можно молча активировать из списка.
+        let mut acc = load_accounts(&app);
+        acc.accounts.retain(|a| a.user_id != uid);
+        if acc.active == Some(uid) {
+            acc.active = None;
+        }
+        store_accounts(&app, &acc);
+        // В .bak не должен остаться токен только что удалённого аккаунта.
+        if let Some(p) = data_path(&app, "accounts.json") {
+            let _ = fs::copy(&p, p.with_extension("json.bak"));
+        }
+        if acc.accounts.is_empty() {
+            let _ = fs::remove_file(site_login_mark());
+        }
+    } else {
+        let mut acc = load_accounts(&app);
+        acc.active = None;
+        store_accounts(&app, &acc);
+        if let Some(p) = data_path(&app, "accounts.json") {
+            let _ = fs::copy(&p, p.with_extension("json.bak"));
+        }
     }
-    *state.session.lock().unwrap() = None;
-    save_session(&app, None);
+    *lock(&state.session) = None;
 }
 
 // ---------- Продление сессии ----------
@@ -565,14 +783,16 @@ async fn refresh_vkid(http: &reqwest::Client, cur: &Session, refresh: &str) -> R
 async fn renew_session(app: &AppHandle, state: &AppState, old_token: &str, urgent: bool) -> Option<Session> {
     {
         let _g = RELOGIN.lock().await;
-        let cur = state.session.lock().unwrap().clone()?;
+        let cur = lock(&state.session).clone()?;
         if cur.token != old_token {
             return Some(cur); // уже продлил параллельный запрос
         }
         if cur.client == "vk_site" {
             // Вход как на сайте: свежий ключ из сохранённых куки — это не вход, ВК его не ограничивает
             let last = LAST_REFRESH_TRY.load(std::sync::atomic::Ordering::Relaxed);
-            if !urgent && now_secs() - last < 60 {
+            // Даже срочное продление — не чаще раза в 5 секунд, иначе поток ошибок
+            // превращается в поток запросов к ВК.
+            if now_secs() - last < 5 || (!urgent && now_secs() - last < 60) {
                 return None;
             }
             LAST_REFRESH_TRY.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
@@ -587,7 +807,7 @@ async fn renew_session(app: &AppHandle, state: &AppState, old_token: &str, urgen
                     let new = Session { token, expires_at: exp, ..cur.clone() };
                     diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": true, "kind": "web_token" }));
                     save_session(app, Some(&new));
-                    *state.session.lock().unwrap() = Some(new.clone());
+                    *lock(&state.session) = Some(new.clone());
                     Some(new)
                 }
                 Ok(_) => {
@@ -603,13 +823,13 @@ async fn renew_session(app: &AppHandle, state: &AppState, old_token: &str, urgen
         if let Some(rt) = cur.refresh_token.clone() {
             // Неудачные попытки не повторяем чаще раза в минуту (в срочном случае — сразу)
             let last = LAST_REFRESH_TRY.load(std::sync::atomic::Ordering::Relaxed);
-            if urgent || now_secs() - last > 60 {
+            if now_secs() - last >= 5 && (urgent || now_secs() - last > 60) {
                 LAST_REFRESH_TRY.store(now_secs(), std::sync::atomic::Ordering::Relaxed);
                 match refresh_vkid(&state.http, &cur, &rt).await {
                     Ok(new) if token_alive(state, &new.token, new.user_agent()).await != Some(false) => {
                         diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": true }));
                         save_session(app, Some(&new));
-                        *state.session.lock().unwrap() = Some(new.clone());
+                        *lock(&state.session) = Some(new.clone());
                         return Some(new);
                     }
                     Ok(_) => diag_set("refresh", serde_json::json!({ "at": now_secs(), "ok": false, "error": "новый ключ не работает" })),
@@ -624,7 +844,7 @@ async fn renew_session(app: &AppHandle, state: &AppState, old_token: &str, urgen
 /// Что известно о текущей сессии — для настроек и окна продления.
 #[tauri::command]
 fn vk_session_info(state: State<'_, AppState>) -> Value {
-    let s = state.session.lock().unwrap().clone();
+    let s = lock(&state.session).clone();
     serde_json::json!({
         "user_id": s.as_ref().map(|s| s.user_id),
         "client": s.as_ref().map(|s| s.client.clone()),
@@ -643,10 +863,11 @@ async fn vk_call(
     method: String,
     params: HashMap<String, Value>,
 ) -> Result<Value, String> {
-    let (token, ua) = state
-        .session
-        .lock()
-        .unwrap()
+    // method подставляется в URL: не даём выйти за пределы api.vk.com/method/
+    if method.is_empty() || !method.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_') {
+        return Err("Недопустимый метод ВКонтакте".into());
+    }
+    let (token, ua) = lock(&state.session)
         .as_ref()
         .map(|s| (s.token.clone(), s.user_agent()))
         .ok_or("not_authorized")?;
@@ -672,7 +893,7 @@ async fn vk_call(
 
     // Ключ с ограниченным сроком (QR, пароль) скоро истечёт — заранее и тихо продлеваем,
     // чтобы сессия не оборвалась посреди прослушивания
-    let expiring = state.session.lock().unwrap().as_ref().and_then(|s| s.expires_at).map(|e| e - now_secs() < 600).unwrap_or(false);
+    let expiring = lock(&state.session).as_ref().and_then(|s| s.expires_at).map(|e| e - now_secs() < 600).unwrap_or(false);
     let (token, ua) = if expiring {
         match renew_session(&app, &state, &token, false).await {
             Some(s) => (s.token.clone(), s.user_agent()),
@@ -714,7 +935,7 @@ async fn vk_call(
             }
             // Продлить не вышло. Из аккаунта не выкидываем: музыка доигрывает, а приложение
             // показывает окно «Продлите вход» с QR-кодом. Новый вход заменит ключ.
-            let still_same = state.session.lock().unwrap().as_ref().map(|s| s.token == token).unwrap_or(false);
+            let still_same = lock(&state.session).as_ref().map(|s| s.token == token).unwrap_or(false);
             if still_same {
                 mark_expired(&app, msg);
             }
@@ -758,7 +979,7 @@ static RELOGIN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static LAST_RELOGIN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 async fn relogin_once(app: &AppHandle, state: &AppState, old_token: &str, urgent: bool) -> Option<Session> {
-    let cur = state.session.lock().unwrap().clone()?;
+    let cur = lock(&state.session).clone()?;
     if cur.token != old_token {
         return Some(cur); // ключ уже обновил параллельный запрос
     }
@@ -777,7 +998,7 @@ async fn relogin_once(app: &AppHandle, state: &AppState, old_token: &str, urgent
     s.name = cur.name.clone();
     s.photo = cur.photo.clone();
     save_session(app, Some(&s));
-    *state.session.lock().unwrap() = Some(s.clone());
+    *lock(&state.session) = Some(s.clone());
     Some(s)
 }
 
@@ -814,7 +1035,7 @@ async fn silent_relogin(app: &AppHandle, user_id: i64) -> Option<Session> {
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(300)).await;
-            if tx_poll.lock().unwrap().is_none() {
+            if lock(&tx_poll).is_none() {
                 break;
             }
             match poll_win.url() {
@@ -834,130 +1055,6 @@ async fn silent_relogin(app: &AppHandle, user_id: i64) -> Option<Session> {
     match res {
         Ok(Ok(Ok(s))) if s.user_id == user_id => Some(s),
         _ => None,
-    }
-}
-
-// ---------- Вход через браузер ----------
-// Открываем страницу ВК в браузере пользователя (там он обычно уже вошёл), он жмёт
-// «Разрешить» и копирует адрес страницы — Melo сам замечает его в буфере обмена.
-
-static BROWSER_LOGIN: Mutex<Option<Reply>> = Mutex::new(None);
-
-fn open_in_browser(url: &str) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        std::process::Command::new("rundll32")
-            .args(["url.dll,FileProtocolHandler", url])
-            .creation_flags(0x0800_0000)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("xdg-open").arg(url).spawn().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
-
-/// Ищет в тексте адрес oauth.vk.com/blank.html#access_token=…
-fn token_from_text(text: &str) -> Option<Result<Session, String>> {
-    let i = text.find("oauth.vk.com/blank.html").or_else(|| text.find("oauth.vk.ru/blank.html"))?;
-    let rest = text[i..].split_whitespace().next()?.trim_end_matches(['"', '\'', '>', ')']);
-    let u = Url::parse(&format!("https://{rest}")).ok()?;
-    parse_redirect(&u)
-}
-
-fn browser_auth_url() -> String {
-    format!(
-        "https://oauth.vk.com/authorize?client_id={CLIENT_ID}&display=page&redirect_uri={REDIRECT}\
-         &scope=audio,offline&response_type=token&v={API_VERSION}"
-    )
-}
-
-#[tauri::command]
-async fn vk_browser_login(app: AppHandle, state: State<'_, AppState>) -> Result<i64, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let tx: Reply = Arc::new(Mutex::new(Some(tx)));
-    if let Some(old) = BROWSER_LOGIN.lock().unwrap().replace(tx.clone()) {
-        reply(&old, Err("Вход отменён".into()));
-    }
-    open_in_browser(&browser_auth_url())?;
-
-    // Следим за буфером обмена: как только там появится адрес с ключом — входим
-    let tx_clip = tx.clone();
-    std::thread::spawn(move || {
-        let mut cb = arboard::Clipboard::new().ok();
-        let initial = cb.as_mut().and_then(|c| c.get_text().ok());
-        let started = std::time::Instant::now();
-        while tx_clip.lock().unwrap().is_some() && started.elapsed() < Duration::from_secs(120) {
-            std::thread::sleep(Duration::from_millis(500));
-            if cb.is_none() {
-                cb = arboard::Clipboard::new().ok();
-            }
-            let Some(c) = cb.as_mut() else { continue };
-            let Ok(text) = c.get_text() else { continue };
-            if initial.as_deref() == Some(text.as_str()) {
-                continue;
-            }
-            if let Some(res) = token_from_text(&text) {
-                if res.is_ok() {
-                    let _ = c.clear(); // не оставляем ключ в буфере обмена
-                }
-                reply(&tx_clip, res);
-                break;
-            }
-        }
-        reply(&tx_clip, Err("Время ожидания входа истекло — попробуйте ещё раз".into()));
-    });
-
-    let result = rx.await.unwrap_or_else(|_| Err("Вход отменён".into()));
-    {
-        let mut cur = BROWSER_LOGIN.lock().unwrap();
-        if cur.as_ref().map(|c| Arc::ptr_eq(c, &tx)).unwrap_or(false) {
-            *cur = None;
-        }
-    }
-    let session = result?;
-    let uid = session.user_id;
-    save_session(&app, Some(&session));
-    *state.session.lock().unwrap() = Some(session);
-    show_main(&app);
-    Ok(uid)
-}
-
-/// Адрес страницы, вставленный вручную.
-/// Если вход ещё ждёт — отдаём ключ ему (вернётся None); если ожидание уже закончилось
-/// (ошибка, перезапуск) — входим сразу сами и возвращаем id пользователя.
-#[tauri::command]
-fn vk_browser_submit(app: AppHandle, state: State<'_, AppState>, text: String) -> Result<Option<i64>, String> {
-    let res = token_from_text(&text).ok_or("В адресе нет ключа входа. Нажмите «Разрешить» в браузере и скопируйте адрес страницы целиком.")?;
-    {
-        let cur = BROWSER_LOGIN.lock().unwrap();
-        if let Some(tx) = cur.as_ref() {
-            if tx.lock().unwrap().is_some() {
-                reply(tx, res);
-                return Ok(None);
-            }
-        }
-    }
-    let session = res?;
-    let uid = session.user_id;
-    save_session(&app, Some(&session));
-    *state.session.lock().unwrap() = Some(session);
-    show_main(&app);
-    Ok(Some(uid))
-}
-
-#[tauri::command]
-fn vk_browser_reopen() -> Result<(), String> {
-    open_in_browser(&browser_auth_url())
-}
-
-#[tauri::command]
-fn vk_browser_cancel() {
-    if let Some(tx) = BROWSER_LOGIN.lock().unwrap().take() {
-        reply(&tx, Err("Вход отменён".into()));
     }
 }
 
@@ -1004,7 +1101,7 @@ async fn vka_get(http: &reqwest::Client, url: &str, query: &[(&str, &str)]) -> R
 }
 
 async fn anon_token(state: &AppState) -> Result<String, String> {
-    if let Some((t, at)) = state.anon.lock().unwrap().clone() {
+    if let Some((t, at)) = lock(&state.anon).clone() {
         if at.elapsed() < Duration::from_secs(3600) {
             return Ok(t);
         }
@@ -1016,7 +1113,7 @@ async fn anon_token(state: &AppState) -> Result<String, String> {
     )
     .await?;
     let t = res["token"].as_str().ok_or("Не удалось получить QR-код")?.to_string();
-    *state.anon.lock().unwrap() = Some((t.clone(), std::time::Instant::now()));
+    *lock(&state.anon) = Some((t.clone(), std::time::Instant::now()));
     Ok(t)
 }
 
@@ -1056,7 +1153,7 @@ fn take_token(app: &AppHandle, state: &AppState, res: &Value) -> bool {
         ..Default::default()
     };
     save_session(app, Some(&session));
-    *state.session.lock().unwrap() = Some(session);
+    *lock(&state.session) = Some(session);
     true
 }
 
@@ -1110,7 +1207,7 @@ async fn exchange_super_token(app: &AppHandle, state: &AppState, r: &Value) -> R
                 ..Default::default()
             };
             save_session(app, Some(&session));
-            *state.session.lock().unwrap() = Some(session);
+            *lock(&state.session) = Some(session);
             return Ok(());
         }
         errors.push(format!("{app_id}: {}", v["error_code"].as_str().or(v["error_info"].as_str()).unwrap_or("нет ответа")));
@@ -1144,7 +1241,7 @@ async fn finish_web_login(app: &AppHandle, state: &AppState, q: &vkweb::WebQr) -
         ..Default::default()
     };
     save_session(app, Some(&session));
-    *state.session.lock().unwrap() = Some(session);
+    *lock(&state.session) = Some(session);
     Ok(())
 }
 
@@ -1155,7 +1252,7 @@ async fn qr_start(state: State<'_, AppState>) -> Result<QrCode, String> {
     match vkweb::qr_start().await {
         Ok((q, url, exp)) => {
             let hash = format!("w:{}", q.auth_hash);
-            *WEB_QR.lock().unwrap() = Some(q);
+            *lock(&WEB_QR) = Some(q);
             return Ok(QrCode { url, hash, expires_at: exp });
         }
         Err(e) => diag_set("qr_site", serde_json::json!({ "at": now_secs(), "error": e })),
@@ -1179,11 +1276,11 @@ async fn qr_start(state: State<'_, AppState>) -> Result<QrCode, String> {
 #[tauri::command]
 async fn qr_check(app: AppHandle, state: State<'_, AppState>, hash: String) -> Result<QrStatus, String> {
     if let Some(h) = hash.strip_prefix("w:") {
-        let q = WEB_QR.lock().unwrap().clone().filter(|q| q.auth_hash == h).ok_or("QR-код устарел")?;
+        let q = lock(&WEB_QR).clone().filter(|q| q.auth_hash == h).ok_or("QR-код устарел")?;
         return Ok(match vkweb::qr_check(&q).await {
             Ok(vkweb::Check::Done) => match finish_web_login(&app, &state, &q).await {
                 Ok(()) => {
-                    *WEB_QR.lock().unwrap() = None;
+                    *lock(&WEB_QR) = None;
                     QrStatus { state: "ok".into(), raw: Value::Null }
                 }
                 Err(e) => QrStatus { state: "error".into(), raw: Value::String(e) },
@@ -1198,7 +1295,8 @@ async fn qr_check(app: AppHandle, state: State<'_, AppState>, hash: String) -> R
                 };
                 QrStatus { state: s.into(), raw: Value::from(st) }
             }
-            Err(e) if e.contains("Нет соединения") => QrStatus { state: "scanned".into(), raw: Value::Null },
+            // Сеть моргнула — не делаем вид, что QR уже отсканирован: продолжаем опрос.
+            Err(e) if e.contains("Нет соединения") => QrStatus { state: "waiting".into(), raw: Value::Null },
             Err(e) => QrStatus { state: "error".into(), raw: Value::String(e) },
         });
     }
@@ -1237,7 +1335,7 @@ async fn qr_check(app: AppHandle, state: State<'_, AppState>, hash: String) -> R
 #[tauri::command]
 async fn qr_submit_code(app: AppHandle, state: State<'_, AppState>, hash: String, code: String) -> Result<QrStatus, String> {
     if let Some(h) = hash.strip_prefix("w:") {
-        let q = WEB_QR.lock().unwrap().clone().filter(|q| q.auth_hash == h).ok_or("QR-код устарел")?;
+        let q = lock(&WEB_QR).clone().filter(|q| q.auth_hash == h).ok_or("QR-код устарел")?;
         let code: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
         let res = vkweb::qr_validate(&q, &code).await?;
         let raw = res["response"]["status"].clone();
@@ -1333,7 +1431,7 @@ async fn validation_window(app: &AppHandle, url: &str) -> Result<Session, String
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(400)).await;
-            if tx_poll.lock().unwrap().is_none() {
+            if lock(&tx_poll).is_none() {
                 break;
             }
             match poll_win.url() {
@@ -1347,7 +1445,11 @@ async fn validation_window(app: &AppHandle, url: &str) -> Result<Session, String
             }
         }
     });
-    let res = rx.await.unwrap_or_else(|_| Err("Вход отменён".into()));
+    let res = match tokio::time::timeout(Duration::from_secs(900), rx).await {
+        Ok(r) => r.unwrap_or_else(|_| Err("Вход отменён".into())),
+        // Окно подтверждения не должно держать команду и спиннер вечно.
+        Err(_) => Err("Время подтверждения входа истекло — попробуйте ещё раз".into()),
+    };
     if let Some(w) = app.get_webview_window("vk-check") {
         let _ = w.close();
     }
@@ -1355,6 +1457,7 @@ async fn validation_window(app: &AppHandle, url: &str) -> Result<Session, String
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn vk_direct_login(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1412,7 +1515,7 @@ async fn vk_direct_login(
         };
         let uid = session.user_id;
         save_session(&app, Some(&session));
-        *state.session.lock().unwrap() = Some(session);
+        *lock(&state.session) = Some(session);
         return Ok(DirectAuth { state: "ok".into(), uid: Some(uid), ..Default::default() });
     }
 
@@ -1456,7 +1559,7 @@ async fn vk_direct_login(
                 session.client = "vk_android".into();
                 let uid = session.user_id;
                 save_session(&app, Some(&session));
-                *state.session.lock().unwrap() = Some(session);
+                *lock(&state.session) = Some(session);
                 return Ok(DirectAuth { state: "ok".into(), uid: Some(uid), ..Default::default() });
             }
             Ok(direct_err(if desc.is_empty() { "ВК просит дополнительную проверку" } else { desc }))
@@ -1532,22 +1635,17 @@ fn forget_autofill(wv: &std::path::Path) {
 static IN_BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(windows)]
-fn set_background(w: &tauri::WebviewWindow, bg: bool) {
-    use std::sync::atomic::Ordering;
-    if IN_BACKGROUND.swap(bg, Ordering::Relaxed) == bg {
-        return;
-    }
-    let _ = w.eval(&format!("window.dispatchEvent(new CustomEvent('melo:background', {{detail: {}}}));", bg));
+fn set_webview_memory(w: &tauri::WebviewWindow, low: bool) {
     let _ = w.with_webview(move |wv| unsafe {
         use webview2_com::Microsoft::Web::WebView2::Win32::{
             ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
         };
         use windows_core::Interface;
         let c = wv.controller();
-        let _ = c.SetIsVisible(!bg);
+        let _ = c.SetIsVisible(!low);
         if let Ok(core) = c.CoreWebView2() {
             if let Ok(c19) = core.cast::<ICoreWebView2_19>() {
-                let _ = c19.SetMemoryUsageTargetLevel(if bg {
+                let _ = c19.SetMemoryUsageTargetLevel(if low {
                     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
                 } else {
                     COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
@@ -1555,6 +1653,24 @@ fn set_background(w: &tauri::WebviewWindow, bg: bool) {
             }
         }
     });
+}
+#[cfg(not(windows))]
+fn set_webview_memory(_w: &tauri::WebviewWindow, _low: bool) {}
+
+fn set_window_memory(window: &tauri::Window, low: bool) {
+    if let Some(w) = window.app_handle().get_webview_window(window.label()) {
+        set_webview_memory(&w, low);
+    }
+}
+
+#[cfg(windows)]
+fn set_background(w: &tauri::WebviewWindow, bg: bool) {
+    use std::sync::atomic::Ordering;
+    if IN_BACKGROUND.swap(bg, Ordering::Relaxed) == bg {
+        return;
+    }
+    let _ = w.eval(format!("window.dispatchEvent(new CustomEvent('melo:background', {{detail: {}}}));", bg));
+    set_webview_memory(w, bg);
 }
 #[cfg(not(windows))]
 fn set_background(_w: &tauri::WebviewWindow, _bg: bool) {}
@@ -1566,7 +1682,7 @@ fn set_background(_w: &tauri::WebviewWindow, _bg: bool) {}
 fn set_window_effect(app: AppHandle, kind: String) -> Result<(), String> {
     use tauri::window::{Effect, EffectsBuilder};
     let w = app.get_webview_window("main").ok_or("нет окна")?;
-    *LAST_EFFECT.lock().unwrap() = kind.clone();
+    *lock(&LAST_EFFECT) = kind.clone();
     let effect = match kind.as_str() {
         "mica" => Some(Effect::Mica),
         "tabbed" => Some(Effect::Tabbed),
@@ -1575,7 +1691,7 @@ fn set_window_effect(app: AppHandle, kind: String) -> Result<(), String> {
     };
     // Меню в трее выглядит так же, как приложение
     if let Some(t) = app.get_webview_window("tray-menu") {
-        match effect.clone() {
+        match effect {
             Some(e) => {
                 let _ = t.set_effects(EffectsBuilder::new().effect(e).build());
                 let _ = t.set_shadow(true);
@@ -1612,13 +1728,13 @@ fn tray_update(app: AppHandle, state: State<'_, AppState>, title: Option<String>
         let _ = tray.set_tooltip(Some(tip));
     }
     let st = TrayState { title, artist, cover, playing };
-    *state.tray.lock().unwrap() = st.clone();
+    *lock(&state.tray) = st.clone();
     let _ = app.emit_to("tray-menu", "tray-state", st);
 }
 
 #[tauri::command]
 fn tray_state(state: State<'_, AppState>) -> TrayState {
-    state.tray.lock().unwrap().clone()
+    lock(&state.tray).clone()
 }
 
 /// Кнопки в меню трея.
@@ -1638,9 +1754,216 @@ fn tray_action(app: AppHandle, action: String) {
     }
 }
 
+/// Прозрачный полноэкранный слой для направляющих мини-плеера.
+/// Он не ловит мышь и не мешает перетаскиванию.
+static GUIDES_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn guides_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
+    if let Some(w) = app.get_webview_window("guides") {
+        return Ok(w);
+    }
+    let w = WebviewWindowBuilder::new(app, "guides", WebviewUrl::App("index.html#guides".into()))
+        .data_directory(webview_dir())
+        .title("Melo guides")
+        .inner_size(640.0, 480.0)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .visible(false)
+        .on_page_load(|w, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                GUIDES_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+                let mini_open = w
+                    .app_handle()
+                    .get_webview_window("mini")
+                    .map(|m| m.is_visible().unwrap_or(false))
+                    .unwrap_or(false);
+                if mini_open {
+                    let _ = w.show();
+                    set_webview_memory(&w, false);
+                }
+            }
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+    let _ = w.set_ignore_cursor_events(true);
+    if let Ok(Some(m)) = app.primary_monitor() {
+        let area = m.work_area();
+        let _ = w.set_position(area.position.clone());
+        let _ = w.set_size(area.size);
+    }
+    Ok(w)
+}
+
+static GUIDES_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn show_guides(app: &AppHandle) {
+    GUIDES_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Ok(w) = guides_window(app) {
+        if GUIDES_READY.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = w.show();
+            set_webview_memory(&w, false);
+        }
+    }
+}
+
+fn hide_guides(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("guides") {
+        let _ = w.hide();
+        set_webview_memory(&w, true);
+    }
+    release_guides(app);
+}
+
+/// Полноэкранный слой направляющих не нужен, пока мини-плеер не тащат.
+fn release_guides(app: &AppHandle) {
+    let my = GUIDES_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(15)).await;
+        if GUIDES_GEN.load(std::sync::atomic::Ordering::Relaxed) != my {
+            return;
+        }
+        if let Some(w) = app.get_webview_window("guides") {
+            if !w.is_visible().unwrap_or(true) {
+                let _ = w.destroy();
+                GUIDES_READY.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+/// Маленькое окно-мини-плеер поверх остальных окон.
+/// Показываем его только после загрузки страницы, иначе WebView2 успевает
+/// показать пустой белый прямоугольник, который нельзя закрыть.
+static MINI_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static MINI_PINNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static MINI_COMPACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+async fn mini_show(app: AppHandle) -> Result<(), String> {
+    use tauri::Emitter;
+    MINI_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    show_guides(&app);
+    if let Some(w) = app.get_webview_window("mini") {
+        if MINI_READY.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = w.set_always_on_top(MINI_PINNED.load(std::sync::atomic::Ordering::Relaxed));
+            let _ = w.show();
+            set_webview_memory(&w, false);
+            let _ = w.set_focus();
+            let _ = app.emit("mini-visibility", true);
+            show_guides(&app);
+        }
+        return Ok(());
+    }
+    MINI_READY.store(false, std::sync::atomic::Ordering::Relaxed);
+    let pinned = MINI_PINNED.load(std::sync::atomic::Ordering::Relaxed);
+    let compact = MINI_COMPACT.load(std::sync::atomic::Ordering::Relaxed);
+    let w = WebviewWindowBuilder::new(&app, "mini", WebviewUrl::App("index.html#mini".into()))
+        .data_directory(webview_dir())
+        .title("Melo")
+        .inner_size(if compact { 300.0 } else { 440.0 }, if compact { 76.0 } else { 158.0 })
+        .min_inner_size(if compact { 260.0 } else { 360.0 }, if compact { 64.0 } else { 120.0 })
+        .max_inner_size(900.0, 420.0)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(true)
+        .always_on_top(pinned)
+        .skip_taskbar(true)
+        .visible(false)
+        .center()
+        .on_page_load(|w, payload| {
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                use tauri::Emitter;
+                MINI_READY.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = w.show();
+                set_webview_memory(&w, false);
+                let _ = w.set_focus();
+                let _ = w.app_handle().emit("mini-visibility", true);
+                show_guides(w.app_handle());
+            }
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+    let _ = w;
+    Ok(())
+}
+
+#[tauri::command]
+fn mini_hide(app: AppHandle) {
+    use tauri::Emitter;
+    if let Some(w) = app.get_webview_window("mini") {
+        let _ = w.hide();
+        set_webview_memory(&w, true);
+        let _ = app.emit("mini-visibility", false);
+    }
+    hide_guides(&app);
+    release_mini(&app);
+}
+
+static MINI_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Закрытый мини-плеер — это отдельный WebView2. Через полминуты закрываем его совсем.
+fn release_mini(app: &AppHandle) {
+    let my = MINI_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        if MINI_GEN.load(std::sync::atomic::Ordering::Relaxed) != my {
+            return;
+        }
+        if let Some(w) = app.get_webview_window("mini") {
+            if !w.is_visible().unwrap_or(true) {
+                let _ = w.destroy();
+                MINI_READY.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+}
+
+#[tauri::command]
+fn mini_is_open(app: AppHandle) -> bool {
+    app.get_webview_window("mini")
+        .map(|w| w.is_visible().unwrap_or(false) && MINI_READY.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn mini_set_pinned(app: AppHandle, value: bool) {
+    MINI_PINNED.store(value, std::sync::atomic::Ordering::Relaxed);
+    if let Some(w) = app.get_webview_window("mini") {
+        let _ = w.set_always_on_top(value);
+    }
+}
+
+#[tauri::command]
+fn mini_set_style(app: AppHandle, compact: bool) {
+    MINI_COMPACT.store(compact, std::sync::atomic::Ordering::Relaxed);
+    if let Some(w) = app.get_webview_window("mini") {
+        let size = if compact {
+            tauri::LogicalSize::new(300.0, 76.0)
+        } else {
+            tauri::LogicalSize::new(440.0, 158.0)
+        };
+        let minimum = if compact {
+            tauri::LogicalSize::new(260.0, 64.0)
+        } else {
+            tauri::LogicalSize::new(360.0, 120.0)
+        };
+        let _ = w.set_min_size(Some(minimum));
+        let _ = w.set_size(size);
+    }
+}
+
 fn hide_tray_menu(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("tray-menu") {
         let _ = w.hide();
+        set_webview_memory(&w, true);
     }
     release_tray_menu(app);
 }
@@ -1674,7 +1997,7 @@ fn create_tray_menu(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     use tauri::window::{Effect, EffectsBuilder};
     let w = create_tray_window(app)?;
     disable_autofill(&w);
-    let effect = match LAST_EFFECT.lock().unwrap().as_str() {
+    let effect = match lock(&LAST_EFFECT).as_str() {
         "mica" => Some(Effect::Mica),
         "tabbed" => Some(Effect::Tabbed),
         "acrylic" => Some(Effect::Acrylic),
@@ -1726,10 +2049,11 @@ fn show_tray_menu(app: &AppHandle, x: f64, y: f64) {
         py = py.min(my + mh - ph).max(my);
     }
     let _ = w.set_position(tauri::PhysicalPosition::new(px.round() as i32, py.round() as i32));
-    let st = app.state::<AppState>().tray.lock().unwrap().clone();
+    let st = lock(&app.state::<AppState>().tray).clone();
     let _ = w.emit("tray-state", st);
     let _ = w.emit("tray-open", ());
     let _ = w.show();
+    set_webview_memory(&w, false);
     let _ = w.set_focus();
 }
 
@@ -1776,7 +2100,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 #[tauri::command]
 fn stream_base(state: State<'_, AppState>) -> String {
-    state.stream_base.lock().unwrap().clone()
+    lock(&state.stream_base).clone()
 }
 
 fn start_stream_server(app: AppHandle) -> Option<String> {
@@ -1786,20 +2110,25 @@ fn start_stream_server(app: AppHandle) -> Option<String> {
     let base = format!("http://127.0.0.1:{port}/{key}/");
     let client = std::sync::Arc::new(
         reqwest::blocking::Client::builder()
-            .timeout(None)
+            // Трек может качаться долго, но зависшее соединение не должно висеть вечно.
             .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(600))
+            // Редиректы проверяем сами: публичный URL не должен уводить в localhost.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .ok()?,
     );
     let prefix = format!("/{key}/");
     let base2 = base.clone();
+    let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     std::thread::spawn(move || {
         for req in server.incoming_requests() {
             let client = client.clone();
             let app = app.clone();
             let base = base2.clone();
             let prefix = prefix.clone();
-            std::thread::spawn(move || serve_stream(req, &client, &app, &base, &prefix));
+            let active = active.clone();
+            std::thread::spawn(move || serve_stream(req, &client, &app, &base, &prefix, &active));
         }
     });
     Some(base)
@@ -1809,7 +2138,164 @@ fn hdr(k: &str, v: &str) -> Option<tiny_http::Header> {
     tiny_http::Header::from_bytes(k.as_bytes(), v.as_bytes()).ok()
 }
 
-fn serve_stream(req: tiny_http::Request, client: &reqwest::blocking::Client, app: &AppHandle, base: &str, prefix: &str) {
+/// Публичный ли адрес — без локальных, приватных, служебных и multicast-диапазонов.
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                || o[0] == 0
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)       // 100.64.0.0/10 — CGNAT
+                || (o[0] == 198 && (o[1] & 0xfe) == 18))      // 198.18.0.0/15 — benchmark
+        }
+        std::net::IpAddr::V6(v6) => {
+            // IPv4-mapped (::ffff:127.0.0.1) должен проверяться как IPv4.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public_ip(std::net::IpAddr::V4(v4));
+            }
+            let seg = v6.segments();
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (seg[0] & 0xfe00) == 0xfc00   // fc00::/7 — unique local
+                || (seg[0] & 0xffc0) == 0xfe80)  // fe80::/10 — link local
+        }
+    }
+}
+
+/// Прокси должен ходить только на публичные https-адреса. Локальные и приватные
+/// адреса — это SSRF в службы компьютера и домашней сети, поэтому их запрещаем.
+fn is_public_target(u: &Url) -> bool {
+    if u.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = u.host_str() else { return false };
+    let h = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local") || h.ends_with(".internal") {
+        return false;
+    }
+    if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+        return is_public_ip(ip);
+    }
+    true
+}
+
+/// Проверка с резолвом DNS: отсекает hostname, указывающий на приватный IP
+/// (в том числе простые варианты DNS rebinding). Адрес резолвится заново
+/// при соединении, поэтому это не полная защита, но заметно сужает SSRF.
+static DNS_CACHE: Mutex<Option<HashMap<String, (bool, std::time::Instant)>>> = Mutex::new(None);
+
+fn resolves_public(u: &Url) -> bool {
+    if !is_public_target(u) {
+        return false;
+    }
+    let Some(host) = u.host_str() else { return false };
+    let h = host.trim_matches(['[', ']']);
+    if h.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    let port = u.port_or_known_default().unwrap_or(443);
+    let key = format!("{h}:{port}");
+    {
+        let cache = lock(&DNS_CACHE);
+        if let Some(map) = cache.as_ref() {
+            if let Some((ok, at)) = map.get(&key) {
+                if at.elapsed() < Duration::from_secs(if *ok { 60 } else { 5 }) {
+                    return *ok;
+                }
+            }
+        }
+    }
+    let Ok(addrs) = (h, port).to_socket_addrs() else {
+        let mut cache = lock(&DNS_CACHE);
+        cache.get_or_insert_with(HashMap::new).insert(key, (false, std::time::Instant::now()));
+        return false;
+    };
+    let mut any = false;
+    let mut ok = true;
+    for addr in addrs {
+        any = true;
+        if !is_public_ip(addr.ip()) {
+            ok = false;
+            break;
+        }
+    }
+    let result = any && ok;
+    let mut cache = lock(&DNS_CACHE);
+    let map = cache.get_or_insert_with(HashMap::new);
+    if map.len() > 256 { map.clear(); }
+    map.insert(key, (result, std::time::Instant::now()));
+    result
+}
+
+fn redirect_target(base: &Url, location: &str) -> Option<Url> {
+    let next = base.join(location).ok()?;
+    resolves_public(&next).then_some(next)
+}
+
+/// Скачивание с ручной проверкой редиректов: каждый следующий адрес должен
+/// оставаться публичным https-адресом.
+fn open_stream(
+    client: &reqwest::blocking::Client,
+    target: &Url,
+    range: Option<&str>,
+    ua: &str,
+) -> Result<(Url, reqwest::blocking::Response), u16> {
+    if !resolves_public(target) {
+        return Err(403);
+    }
+    let mut url = target.clone();
+    for _ in 0..5 {
+        let mut up = client.get(url.clone()).header("User-Agent", ua);
+        if let Some(r) = range {
+            up = up.header("Range", r);
+        }
+        let res = up.send().map_err(|_| 502u16)?;
+        if res.status().is_redirection() {
+            let next = res
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|loc| redirect_target(&url, loc));
+            match next {
+                Some(n) => { url = n; continue; }
+                None => return Err(403),
+            }
+        }
+        return Ok((url, res));
+    }
+    Err(502)
+}
+
+/// Счётчик одновременных запросов к прокси: без него поток на каждый запрос
+/// превращается в неограниченный пул.
+struct ActiveGuard(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn serve_stream(
+    req: tiny_http::Request,
+    client: &reqwest::blocking::Client,
+    app: &AppHandle,
+    base: &str,
+    prefix: &str,
+    active: &Arc<std::sync::atomic::AtomicUsize>,
+) {
+    if active.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 24 {
+        active.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = req.respond(tiny_http::Response::empty(503));
+        return;
+    }
+    let _slot = ActiveGuard(active.clone());
     let cors = [
         hdr("Access-Control-Allow-Origin", "*"),
         hdr("Access-Control-Allow-Headers", "*"),
@@ -1849,15 +2335,11 @@ fn serve_stream(req: tiny_http::Request, client: &reqwest::blocking::Client, app
         .and_then(|rest| Url::parse(&format!("http://x/{rest}")).ok())
         .and_then(|u| u.query_pairs().find(|(k, _)| k == "u").map(|(_, v)| v.into_owned()))
         .and_then(|t| Url::parse(&t).ok())
-        .filter(|t| t.scheme() == "https")
+        .filter(is_public_target)
     else {
         return fail(req, 403);
     };
-    let ua = app
-        .state::<AppState>()
-        .session
-        .lock()
-        .unwrap()
+    let ua = lock(&app.state::<AppState>().session)
         .as_ref()
         .map(|s| s.user_agent())
         .unwrap_or(KATE_UA);
@@ -1866,12 +2348,9 @@ fn serve_stream(req: tiny_http::Request, client: &reqwest::blocking::Client, app
         .iter()
         .find(|h| h.field.equiv("Range"))
         .map(|h| h.value.as_str().to_string());
-    let mut up = client.get(target.clone()).header("User-Agent", ua);
-    if let Some(r) = &range {
-        up = up.header("Range", r);
-    }
-    let Ok(res) = up.send() else {
-        return fail(req, 502);
+    let (target, res) = match open_stream(client, &target, range.as_deref(), ua) {
+        Ok(v) => v,
+        Err(code) => return fail(req, code),
     };
     let status = res.status().as_u16();
     let content_type = res.headers().get("content-type").and_then(|v| v.to_str().ok()).map(str::to_string);
@@ -1896,34 +2375,37 @@ fn serve_stream(req: tiny_http::Request, client: &reqwest::blocking::Client, app
     // Normalize that response to a real 206 so WebView2 can seek reliably.
     if status == 200 {
         if let Some(range) = range.as_deref() {
-            let bytes = res.bytes().unwrap_or_default();
-            let valid = range
-                .strip_prefix("bytes=")
-                .and_then(|v| v.split(',').next())
-                .and_then(|spec| {
-                    let mut parts = spec.splitn(2, '-');
-                    let start = parts.next()?.trim().parse::<usize>().ok()?;
-                    let end = parts.next().and_then(|v| {
-                        let v = v.trim();
-                        if v.is_empty() { None } else { v.parse::<usize>().ok() }
-                    });
-                    if start >= bytes.len() { return None; }
-                    let last = end.unwrap_or(bytes.len() - 1).min(bytes.len() - 1);
-                    (last >= start).then_some((start, last))
-                });
-            if let Some((start, last)) = valid {
-                let body = bytes.slice(start..=last).to_vec();
-                headers.extend(hdr("Accept-Ranges", "bytes"));
-                headers.extend(hdr("Content-Range", &format!("bytes {start}-{last}/{}", bytes.len())));
-                headers.extend(hdr("Content-Length", &body.len().to_string()));
-                let mut response = tiny_http::Response::from_data(body).with_status_code(206);
-                for h in headers {
-                    response.add_header(h);
-                }
-                let _ = req.respond(response);
-            } else {
-                fail(req, 416);
+            // Не буферизуем весь трек в память: пропускаем ненужное начало
+            // и отдаём запрошенный кусок потоком.
+            let Some(len) = res.content_length().map(|l| l as usize) else {
+                return fail(req, 502);
+            };
+            let Some((start, last)) = parse_range(range, len) else {
+                return fail(req, 416);
+            };
+            let mut res = res;
+            let mut skip = start;
+            let mut buf = [0u8; 64 * 1024];
+            while skip > 0 {
+                let want = skip.min(buf.len());
+                let n = match res.read(&mut buf[..want]) {
+                    Ok(0) | Err(_) => return fail(req, 416),
+                    Ok(n) => n,
+                };
+                skip -= n;
             }
+            let size = (last - start + 1) as u64;
+            headers.extend(hdr("Accept-Ranges", "bytes"));
+            headers.extend(hdr("Content-Range", &format!("bytes {start}-{last}/{len}")));
+            headers.extend(hdr("Content-Length", &size.to_string()));
+            let response = tiny_http::Response::new(
+                tiny_http::StatusCode(206),
+                headers,
+                res.take(size),
+                Some(size as usize),
+                None,
+            );
+            let _ = req.respond(response);
             return;
         }
     }
@@ -1988,8 +2470,101 @@ fn error_response(status: u16) -> Response<Vec<u8>> {
         .unwrap()
 }
 
+async fn open_proxy(
+    http: &reqwest::Client,
+    target: &Url,
+    range: Option<&str>,
+    ua: &str,
+) -> Result<(Url, reqwest::Response), u16> {
+    if !resolves_public(target) {
+        return Err(403);
+    }
+    let mut url = target.clone();
+    for _ in 0..5 {
+        let mut upstream = http.get(url.clone()).header("User-Agent", ua);
+        if let Some(r) = range {
+            upstream = upstream.header("Range", r);
+        }
+        let res = upstream.send().await.map_err(|_| 502u16)?;
+        if res.status().is_redirection() {
+            let next = res
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|loc| redirect_target(&url, loc));
+            match next {
+                Some(n) => { url = n; continue; }
+                None => return Err(403),
+            }
+        }
+        return Ok((url, res));
+    }
+    Err(502)
+}
+
+fn parse_range(spec: &str, len: usize) -> Option<(usize, usize)> {
+    if len == 0 { return None; }
+    let spec = spec.strip_prefix("bytes=")?.split(',').next()?.trim();
+    let (a, b) = spec.split_once('-')?;
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_empty() {
+        let n: usize = b.parse().ok()?;
+        if n == 0 { return None; }
+        return Some((len.saturating_sub(n), len - 1));
+    }
+    let start: usize = a.parse().ok()?;
+    if start >= len { return None; }
+    let last = if b.is_empty() { len - 1 } else { b.parse::<usize>().ok()?.min(len - 1) };
+    (last >= start).then_some((start, last))
+}
+
+/// Запасной протокол тоже должен уметь отдавать офлайн-файлы, если локальный
+/// tiny_http-сервер не поднялся.
+fn offline_proxy_response(uri: &str, range: Option<&str>) -> Option<Response<Vec<u8>>> {
+    let u = Url::parse(uri).ok()?;
+    let path = u.path();
+    let cover = path.ends_with("/cover");
+    if !cover && !path.ends_with("/local") {
+        return None;
+    }
+    let rel = u.query_pairs().find(|(k, _)| k == "p").map(|(_, v)| v.into_owned())?;
+    let file = offline::resolve(&rel)?;
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
+    let mime = offline::mime(&ext);
+    let (mut data, ctype) = if cover && !mime.starts_with("image/") {
+        offline::cover_data(&file)?
+    } else {
+        (fs::read(&file).ok()?, mime.to_string())
+    };
+    let mut status = 200u16;
+    let mut content_range = None;
+    if let Some(spec) = range {
+        if let Some((start, last)) = parse_range(spec, data.len()) {
+            let total = data.len();
+            data = data[start..=last].to_vec();
+            status = 206;
+            content_range = Some(format!("bytes {start}-{last}/{total}"));
+        }
+    }
+    let mut b = Response::builder()
+        .status(status)
+        .header("Content-Type", ctype)
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Expose-Headers", "Content-Range, Accept-Ranges, Content-Length")
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", data.len().to_string());
+    if let Some(cr) = content_range {
+        b = b.header("Content-Range", cr);
+    }
+    b.body(data).ok()
+}
+
 async fn proxy(app: AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let uri = req.uri().to_string();
+    let req_range = req.headers().get("range").and_then(|v| v.to_str().ok()).map(str::to_string);
+    if let Some(local) = offline_proxy_response(&uri, req_range.as_deref()) {
+        return local;
+    }
     let base = if uri.starts_with("vkstream://") {
         "vkstream://localhost/"
     } else {
@@ -2002,21 +2577,19 @@ async fn proxy(app: AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
     else {
         return error_response(400);
     };
-    if target.scheme() != "https" {
+    if !is_public_target(&target) {
         return error_response(403);
     }
 
     let state = app.state::<AppState>();
-    let http = state.http.clone();
-    let ua = state.session.lock().unwrap().as_ref().map(|s| s.user_agent()).unwrap_or(KATE_UA);
-    let mut upstream = http.get(target.clone()).header("User-Agent", ua);
-    if let Some(range) = req.headers().get("range").and_then(|v| v.to_str().ok()) {
-        upstream = upstream.header("Range", range); // нужно для перемотки mp3
-    }
-    let Ok(res) = upstream.send().await else {
-        return error_response(502);
+    let http = state.proxy_http.clone();
+    let ua = lock(&state.session).as_ref().map(|s| s.user_agent()).unwrap_or(KATE_UA);
+    let range = req_range;
+    let (target, res) = match open_proxy(&http, &target, range.as_deref(), ua).await {
+        Ok(v) => v,
+        Err(code) => return error_response(code),
     };
-    let status = res.status().as_u16();
+    let mut status = res.status().as_u16();
     let pass: Vec<(String, String)> = ["content-range", "accept-ranges"]
         .iter()
         .filter_map(|h| res.headers().get(*h).and_then(|v| v.to_str().ok()).map(|v| (h.to_string(), v.to_string())))
@@ -2027,15 +2600,27 @@ async fn proxy(app: AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    let Ok(bytes) = res.bytes().await else {
+    let Ok(raw) = res.bytes().await else {
         return error_response(502);
     };
 
     let is_playlist = target.path().ends_with(".m3u8") || ctype.contains("mpegurl");
+    let mut bytes = Vec::from(raw);
+    let mut normalized: Option<String> = None;
+    if !is_playlist && status == 200 {
+        if let Some(spec) = range.as_deref() {
+            if let Some((start, last)) = parse_range(spec, bytes.len()) {
+                let total = bytes.len();
+                bytes = bytes[start..=last].to_vec();
+                status = 206;
+                normalized = Some(format!("bytes {start}-{last}/{total}"));
+            }
+        }
+    }
     let body = if is_playlist {
         rewrite_m3u8(&String::from_utf8_lossy(&bytes), &target, base).into_bytes()
     } else {
-        Vec::from(bytes)
+        bytes
     };
 
     let mut b = Response::builder()
@@ -2047,6 +2632,10 @@ async fn proxy(app: AppHandle, req: Request<Vec<u8>>) -> Response<Vec<u8>> {
         for (k, v) in &pass {
             b = b.header(k.as_str(), v.as_str());
         }
+        if let Some(cr) = normalized.as_deref() {
+            b = b.header("Content-Range", cr).header("Accept-Ranges", "bytes");
+        }
+        b = b.header("Content-Length", body.len().to_string());
     }
     b.body(body).unwrap()
 }
@@ -2058,6 +2647,13 @@ pub fn run() {
         .timeout(Duration::from_secs(20))
         .build()
         .expect("http client");
+    let proxy_http = reqwest::Client::builder()
+        .user_agent(KATE_UA)
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(600))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("proxy http client");
 
     // Все данные (токены ВК, cookies, настройки) — в папке установки.
     let _ = fs::create_dir_all(data_root());
@@ -2070,21 +2666,36 @@ pub fn run() {
     tauri::Builder::default()
         // Повторный запуск (ярлык, меню «Пуск») не открывает вторую копию, а показывает уже открытое окно
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
-        .manage(AppState { session: Mutex::new(None), http, anon: Mutex::new(None), stream_base: Mutex::new(String::new()), close_to_tray: std::sync::atomic::AtomicBool::new(false), tray: Mutex::new(TrayState::default()) })
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .manage(AppState { session: Mutex::new(None), http, proxy_http, anon: Mutex::new(None), stream_base: Mutex::new(String::new()), close_to_tray: std::sync::atomic::AtomicBool::new(false), tray: Mutex::new(TrayState::default()) })
         .setup(|app| {
             cleanup_old_exe();
+            discord::start();
             let handle = app.handle().clone();
             let session = load_session(&handle);
-            *app.state::<AppState>().session.lock().unwrap() = session;
+            *lock(&app.state::<AppState>().session) = session;
+            // Сервер музыки поднимаем до создания окна: фронтенд не должен успеть
+            // получить пустой stream_base и уйти на запасной протокол.
+            if let Some(base) = start_stream_server(handle.clone()) {
+                *lock(&app.state::<AppState>().stream_base) = base;
+            }
             if app.get_webview_window("main").is_none() {
                 if let Some(cfg) = app.config().app.windows.iter().find(|w| w.label == "main").cloned() {
                     let w = WebviewWindowBuilder::from_config(app.handle(), &cfg)?
                         .data_directory(webview_dir())
                         .build()?;
                     disable_autofill(&w);
+                    if std::env::args().any(|a| a == "--minimized") {
+                        let _ = w.hide();
+                        set_background(&w, true);
+                    }
                 }
             }
             setup_tray(app)?;
+            if std::env::args().any(|a| a == "--mini") {
+                let h = handle.clone();
+                tauri::async_runtime::spawn(async move { let _ = mini_show(h).await; });
+            }
             // Фоновое продление: раз в 5 минут смотрим, не истекает ли ключ, даже если
             // приложение просто играет музыку и к ВК не обращается
             let bg = handle.clone();
@@ -2092,7 +2703,7 @@ pub fn run() {
                 loop {
                     tokio::time::sleep(Duration::from_secs(300)).await;
                     let state = bg.state::<AppState>();
-                    let cur = state.session.lock().unwrap().clone();
+                    let cur = lock(&state.session).clone();
                     let Some(cur) = cur else { continue };
                     let expired = SESSION_EXPIRED.load(std::sync::atomic::Ordering::Relaxed);
                     // Ключ из куки можно брать снова и снова: если сеть моргнула и ключ «умер» — пробуем опять
@@ -2104,17 +2715,26 @@ pub fn run() {
                     }
                 }
             });
-            if let Some(base) = start_stream_server(handle.clone()) {
-                *app.state::<AppState>().stream_base.lock().unwrap() = base;
-            }
             Ok(())
         })
         .on_window_event(|window, event| {
             if window.label() == "tray-menu" {
                 match event {
-                    WindowEvent::Focused(false) => { let _ = window.hide(); release_tray_menu(window.app_handle()); }
-                    WindowEvent::CloseRequested { api, .. } => { api.prevent_close(); let _ = window.hide(); release_tray_menu(window.app_handle()); }
+                    WindowEvent::Focused(false) => { let _ = window.hide(); set_window_memory(window, true); release_tray_menu(window.app_handle()); }
+                    WindowEvent::CloseRequested { api, .. } => { api.prevent_close(); let _ = window.hide(); set_window_memory(window, true); release_tray_menu(window.app_handle()); }
                     _ => {}
+                }
+                return;
+            }
+            if window.label() == "mini" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    use tauri::Emitter;
+                    api.prevent_close();
+                    let _ = window.hide();
+                    set_window_memory(window, true);
+                    let _ = window.app_handle().emit("mini-visibility", false);
+                    hide_guides(window.app_handle());
+                    release_mini(window.app_handle());
                 }
                 return;
             }
@@ -2142,7 +2762,7 @@ pub fn run() {
                 responder.respond(proxy(app, request).await);
             });
         })
-        .invoke_handler(tauri::generate_handler![offline::offline_root_path, offline::offline_list, offline::offline_playlist, offline::offline_tracks, offline::offline_create, offline::offline_update, offline::offline_delete_playlist, offline::offline_delete_track, offline::offline_add_files, offline::offline_add_paths, offline::offline_pick_cover, offline::offline_open, vk_direct_login, vk_login, vk_browser_login, vk_browser_submit, vk_browser_reopen, vk_browser_cancel, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install, cursor_client, vk_session_info])
+        .invoke_handler(tauri::generate_handler![offline::offline_root_path, offline::offline_list, offline::offline_playlist, offline::offline_tracks, offline::offline_create, offline::offline_update, offline::offline_delete_playlist, offline::offline_delete_track, offline::offline_add_files, offline::offline_add_paths, offline::offline_pick_cover, offline::offline_open, vk_direct_login, vk_login, vk_session, vk_logout, vk_call, qr_start, qr_check, qr_submit_code, stream_base, accounts_list, account_switch, account_remove, account_set_info, account_detach, app_info, set_close_to_tray, tray_update, tray_state, tray_action, set_window_effect, update_check, update_install, cursor_client, vk_session_info, autostart_get, autostart_set, open_external, mini_show, mini_hide, mini_is_open, mini_set_pinned, mini_set_style, discord::discord_update, save_text_file, offline::offline_import_m3u, offline_download])
         .run(tauri::generate_context!())
         .expect("ошибка при запуске приложения");
 }
@@ -2199,6 +2819,28 @@ fn pick_release(list: &[Value]) -> Option<(&Value, &Value)> {
         })
 }
 
+/// Контрольная сумма из файла `Melo.exe.sha256` рядом с релизом.
+async fn fetch_sha(http: &reqwest::Client, exe_url: &str) -> Option<String> {
+    let r = http
+        .get(format!("{exe_url}.sha256"))
+        .header("User-Agent", "Melo-updater")
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .ok()?;
+    if !r.status().is_success() {
+        return None;
+    }
+    let text = r.text().await.ok()?;
+    let h = text
+        .split_whitespace()
+        .next()?
+        .trim()
+        .trim_start_matches("sha256:")
+        .to_ascii_lowercase();
+    (h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit())).then_some(h)
+}
+
 #[tauri::command]
 async fn update_check(app: AppHandle, state: State<'_, AppState>) -> Result<UpdateInfo, String> {
     let current = app.package_info().version.to_string();
@@ -2221,14 +2863,22 @@ async fn update_check(app: AppHandle, state: State<'_, AppState>) -> Result<Upda
                 let list: Vec<Value> = r.json().await.unwrap_or_default();
                 if let Some((rel, asset)) = pick_release(&list) {
                     let version = rel["tag_name"].as_str().unwrap_or_default().trim_start_matches(['v', 'V']).to_string();
+                    let asset_url = asset["browser_download_url"].as_str().unwrap_or_default().to_string();
+                    // GitHub отдаёт digest не для всех ассетов — тогда берём .sha256 из релиза
+                    let digest = match asset["digest"].as_str() {
+                        Some(d) => Some(d.trim_start_matches("sha256:").to_lowercase()),
+                        None => fetch_sha(&state.http, &asset_url).await,
+                    };
+                    let digest_ok = digest.as_deref().map(|d| d.len() == 64 && d.chars().all(|c| c.is_ascii_hexdigit())).unwrap_or(false);
                     return Ok(UpdateInfo {
-                        available: parse_ver(&version) > parse_ver(&current),
+                        // Без корректной контрольной суммы установка всё равно не начнётся — не предлагаем её.
+                        available: digest_ok && parse_ver(&version) > parse_ver(&current),
                         current,
                         version,
                         notes: rel["body"].as_str().unwrap_or_default().to_string(),
-                        url: asset["browser_download_url"].as_str().unwrap_or_default().to_string(),
+                        url: asset_url,
                         size: asset["size"].as_u64().unwrap_or(0),
-                        digest: asset["digest"].as_str().map(|d| d.trim_start_matches("sha256:").to_lowercase()),
+                        digest,
                         page: rel["html_url"].as_str().unwrap_or_default().to_string(),
                     });
                 }
@@ -2264,14 +2914,17 @@ async fn update_check(app: AppHandle, state: State<'_, AppState>) -> Result<Upda
     let ok = head.as_ref().map(|r| r.status().is_success()).unwrap_or(false);
     let size = head.ok().and_then(|r| r.content_length()).unwrap_or(0);
     let version = tag.trim_start_matches(['v', 'V']).to_string();
+    let digest = if ok { fetch_sha(&state.http, &url).await } else { None };
+    let download_url = if ok { url } else { String::new() };
     Ok(UpdateInfo {
-        available: ok && parse_ver(&version) > parse_ver(&current),
+        // Без контрольной суммы обновление всё равно не установится — не предлагаем его
+        available: ok && digest.is_some() && parse_ver(&version) > parse_ver(&current),
         current,
         version,
         notes: String::new(),
-        url: if ok { url } else { String::new() },
+        url: download_url,
         size,
-        digest: None,
+        digest,
         page: final_url,
     })
 }
@@ -2280,8 +2933,22 @@ async fn update_check(app: AppHandle, state: State<'_, AppState>) -> Result<Upda
 async fn update_install(app: AppHandle, state: State<'_, AppState>, url: String, digest: Option<String>) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     use tauri::Emitter;
-    if !url.starts_with("https://github.com/") && !url.starts_with("https://objects.githubusercontent.com/") {
+    // Обновляемся только из релизов этого репозитория: любой другой GitHub-URL,
+    // подсунутый через IPC, не должен приводить к запуску произвольного exe.
+    let expected_prefix = format!("https://github.com/{UPDATE_REPO}/releases/download/");
+    if !url.starts_with(&expected_prefix) {
         return Err("Странная ссылка на обновление".into());
+    }
+    // Контрольную сумму берём заново с GitHub по проверенной ссылке,
+    // а не доверяем digest, присланному из WebView.
+    let Some(expected_digest) = fetch_sha(&state.http, &url).await else {
+        return Err("В релизе нет контрольной суммы — обновление отменено".into());
+    };
+    if let Some(passed) = digest.as_deref() {
+        let passed = passed.trim().trim_start_matches("sha256:").to_ascii_lowercase();
+        if passed != expected_digest {
+            return Err("Контрольная сумма не совпадает с проверенной".into());
+        }
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe.parent().ok_or("нет папки")?.to_path_buf();
@@ -2310,11 +2977,14 @@ async fn update_install(app: AppHandle, state: State<'_, AppState>, url: String,
     if buf.len() < 1_000_000 || &buf[..2] != b"MZ" {
         return Err("Скачанный файл повреждён".into());
     }
-    if let Some(d) = digest.filter(|d| !d.is_empty()) {
-        let got: String = Sha256::digest(&buf).iter().map(|b| format!("{b:02x}")).collect();
-        if got != d {
-            return Err("Контрольная сумма не совпала — обновление отменено".into());
-        }
+    // Берём digest, который запомнил update_check, а не присланный из JS.
+    let d = expected_digest;
+    if d.len() != 64 || !d.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("В релизе нет корректной контрольной суммы — обновление отменено".into());
+    }
+    let got: String = Sha256::digest(&buf).iter().map(|b| format!("{b:02x}")).collect();
+    if got != d {
+        return Err("Контрольная сумма не совпала — обновление отменено".into());
     }
     let new = dir.join("Melo.new.exe");
     let old = exe.with_extension("old");
@@ -2325,8 +2995,10 @@ async fn update_install(app: AppHandle, state: State<'_, AppState>, url: String,
         let _ = std::fs::rename(&old, &exe);
         return Err(format!("Не удалось заменить exe: {e}"));
     }
-    std::process::Command::new(&exe).spawn().map_err(|e| format!("Не удалось перезапустить: {e}"))?;
-    app.exit(0);
+    // Не запускаем новый exe до выхода старого: single-instance плагин принял бы
+    // новый процесс за второй экземпляр и сразу закрыл бы его. request_restart
+    // перезапускает приложение после завершения текущего процесса.
+    app.request_restart();
     Ok(())
 }
 
@@ -2342,5 +3014,68 @@ fn cleanup_old_exe() {
                 std::thread::sleep(Duration::from_secs(1));
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn public(s: &str) -> bool {
+        is_public_target(&Url::parse(s).unwrap())
+    }
+
+    #[test]
+    fn versions_are_ordered() {
+        assert!(parse_ver("0.9.10") > parse_ver("0.9.9"));
+        assert!(parse_ver("1.0.0") > parse_ver("1.0.0-rc1"));
+        assert_eq!(parse_ver("v0.9.10"), parse_ver("0.9.10"));
+    }
+
+    #[test]
+    fn proxy_rejects_local_and_private_targets() {
+        assert!(!public("http://vk.com/audio.mp3"));
+        assert!(!public("https://localhost/a"));
+        assert!(!public("https://127.0.0.1/a"));
+        assert!(!public("https://192.168.1.10/a"));
+        assert!(!public("https://10.0.0.5/a"));
+        assert!(!public("https://[::1]/a"));
+        assert!(!public("https://router.local/a"));
+        assert!(!public("https://service.internal/a"));
+    }
+
+    #[test]
+    fn proxy_allows_public_https() {
+        assert!(public("https://sun9-1.userapi.com/a.mp3"));
+        assert!(public("https://8.8.8.8/a.mp3"));
+        assert!(public("https://vk.com/a.mp3"));
+    }
+
+    #[test]
+    fn proxy_rejects_service_ranges_and_mapped_v4() {
+        assert!(!public("https://100.64.0.1/a"));
+        assert!(!public("https://198.18.0.1/a"));
+        assert!(!public("https://[::ffff:127.0.0.1]/a"));
+        assert!(!public("https://0.0.0.0/a"));
+    }
+
+    #[test]
+    fn byte_range_is_parsed() {
+        assert_eq!(parse_range("bytes=10-19", 100), Some((10, 19)));
+        assert_eq!(parse_range("bytes=90-", 100), Some((90, 99)));
+        assert_eq!(parse_range("bytes=-10", 100), Some((90, 99)));
+        assert_eq!(parse_range("bytes=100-", 100), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dpapi_roundtrip_and_seal_format() {
+        let data = b"vk-access-token";
+        let sealed = seal(data);
+        assert_eq!(&sealed[..SEALED_MAGIC.len()], SEALED_MAGIC);
+        assert_ne!(&sealed[SEALED_MAGIC.len()..], &data[..]);
+        assert_eq!(unseal(&sealed).unwrap(), data.to_vec());
+        // Старый незашифрованный файл читается как есть
+        assert_eq!(unseal(data).unwrap(), data.to_vec());
     }
 }

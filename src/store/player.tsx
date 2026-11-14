@@ -8,6 +8,7 @@ import { Track } from "../types";
 import { useUi } from "./ui";
 import { applyEq, attachEq, resumeEq } from "./eq";
 import { useSettings } from "./settings";
+import { rememberPlayed } from "./played";
 
 export type Repeat = "off" | "all" | "one";
 
@@ -22,6 +23,13 @@ type PlayerState = {
   volume: number;
   shuffle: boolean;
   repeat: Repeat;
+  /** Unix-время окончания таймера сна */
+  sleepAt: number | null;
+  /** Сколько треков ещё доиграет перед паузой */
+  sleepTracks: number | null;
+  setSleepTimer: (minutes: number | null) => void;
+  setSleepAfterTracks: (tracks: number | null) => void;
+  clearSleep: () => void;
   playList: (tracks: Track[], startIndex?: number) => void;
   playTrack: (track: Track, list: Track[]) => void;
   jump: (i: number) => void;
@@ -29,6 +37,8 @@ type PlayerState = {
   next: () => void;
   prev: () => void;
   seek: (sec: number) => void;
+  /** Перемотка относительно текущей позиции (стрелки клавиатуры). */
+  seekBy: (delta: number) => void;
   setVolume: (v: number) => void;
   toggleShuffle: () => void;
   cycleRepeat: () => void;
@@ -38,6 +48,10 @@ type PlayerState = {
   append: (tracks: Track[]) => void;
   /** Заменить всё, что играет после текущего трека. */
   replaceUpcoming: (tracks: Track[]) => void;
+  /** Переставить трек в очереди (только предстоящие). */
+  moveInQueue: (from: number, to: number) => void;
+  /** Убрать всё, что играет после текущего трека. */
+  clearUpcoming: () => void;
   /** Подменить играющий трек другой версией, сохранив позицию. */
   swapCurrent: (t: Track) => void;
   removeAt: (i: number) => void;
@@ -112,6 +126,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const [volume, setVolumeState] = useState<number>(() => saved("melo.volume", 0.7));
   const [shuffle, setShuffle] = useState<boolean>(() => saved("melo.shuffle", false));
   const [repeat, setRepeat] = useState<Repeat>(() => saved("melo.repeat", "off"));
+  const [sleepAt, setSleepAt] = useState<number | null>(null);
+  const [sleepTracks, setSleepTracks] = useState<number | null>(null);
+  const sleepTracksRef = useRef<number | null>(null);
+  sleepTracksRef.current = sleepTracks;
 
   const current = queue[index] ?? null;
   const state = useRef({ queue, index, repeat });
@@ -121,6 +139,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   skipRef.current = settings.skipUnavailable;
   const resumeKey = useRef<string | null>(null);
   const fadeTimer = useRef<number | undefined>(undefined);
+  const transitionTimer = useRef<number | undefined>(undefined);
+  const transitionResolve = useRef<(() => void) | null>(null);
+  const smoothRef = useRef(settings.smoothTracks);
+  smoothRef.current = settings.smoothTracks;
   // Предел громкости из настроек: ползунок 0–100% даёт 0–volumeMax реальной громкости
   const volMax = Math.min(1, Math.max(0.05, settings.volumeMax ?? 1));
   const volRef = useRef(volume * volMax);
@@ -128,6 +150,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const loadSeq = useRef(0);
   const retried = useRef(false);
   const playingTrack = useRef<Track | null>(null);
+  // Какой трек сейчас реально загружен в <audio>. Нужен, чтобы не сохранить
+  // позицию предыдущего трека как позицию нового (см. блок resume ниже).
+  const loadedId = useRef<string | null>(null);
 
   // Подменяет трек в очереди (например, после обновления ссылки)
   const patchQueue = (t: Track) => {
@@ -173,11 +198,42 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     return load(next, autoplay);
   };
 
+  const fadeOut = (el: HTMLAudioElement, ms: number) => new Promise<void>((resolve) => {
+    transitionResolve.current?.();
+    transitionResolve.current = resolve;
+    clearInterval(transitionTimer.current);
+    const from = el.volume;
+    const start = performance.now();
+    transitionTimer.current = window.setInterval(() => {
+      const k = Math.min(1, (performance.now() - start) / ms);
+      el.volume = Math.max(0, from * (1 - k));
+      if (k >= 1) {
+        clearInterval(transitionTimer.current);
+        transitionResolve.current = null;
+        resolve();
+      }
+    }, 16);
+  });
+  const fadeIn = (el: HTMLAudioElement, to: number, ms: number) => {
+    clearInterval(transitionTimer.current);
+    const from = el.volume;
+    const start = performance.now();
+    transitionTimer.current = window.setInterval(() => {
+      const k = Math.min(1, (performance.now() - start) / ms);
+      el.volume = from + (to - from) * k;
+      if (k >= 1) clearInterval(transitionTimer.current);
+    }, 16);
+  };
+
   // Загрузка трека в <audio>. Если ссылки нет или она протухла — берём свежую.
   const load = useCallback(
     async (t: Track, autoplay: boolean, isRetry = false, resumeAt = 0): Promise<boolean> => {
       const seq = ++loadSeq.current;
       const el = audio.current;
+      if (!isRetry && smoothRef.current && !el.paused && el.getAttribute("src")) {
+        await fadeOut(el, 160);
+        if (seq !== loadSeq.current) return true;
+      }
       hls.current?.destroy();
       hls.current = null;
       setPosition(resumeAt);
@@ -200,6 +256,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       playingTrack.current = track;
 
       const src = await api.streamUrl(track.url!);
+      if (seq !== loadSeq.current) return true;
       let HlsEngine: Awaited<ReturnType<typeof loadHls>> | null = null;
       if (track.url!.includes(".m3u8")) {
         setBuffering(true);
@@ -208,10 +265,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (seq !== loadSeq.current) return true;
       }
       if (HlsEngine?.isSupported()) {
-        const h = new HlsEngine({ enableWorker: true, maxBufferLength: 30, maxMaxBufferLength: 60, backBufferLength: 15, maxBufferSize: 20 * 1000 * 1000 });
+        const h = new HlsEngine({ enableWorker: true, maxBufferLength: 20, maxMaxBufferLength: 40, backBufferLength: 10, maxBufferSize: 12 * 1000 * 1000 });
         h.on(HlsEngine.Events.ERROR, (_, d) => {
           if (!d.fatal || seq !== loadSeq.current) return;
-          if (!retried.current) load(t, autoplay, true);
+          // Перезагрузка HLS должна продолжаться с того же места, иначе перемотка теряется
+          if (!retried.current) load(t, autoplay, true, el.currentTime);
           else {
             setPlaying(false);
             altRef.current(t, autoplay, `${d.details}${d.response?.code ? ` (${d.response.code})` : ""}`);
@@ -223,6 +281,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       } else {
         el.src = src;
       }
+      loadedId.current = track.id;
       if (resumeAt > 0) {
         let restored = false;
         const restorePosition = () => {
@@ -246,7 +305,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (autoplay) {
         attachEq(el);
         resumeEq();
-        el.play().catch(() => {});
+        el.volume = 0;
+        el.play().catch(() => { el.volume = volRef.current; });
+        fadeIn(el, volRef.current, 220);
         // Если за 20 секунд звук так и не пошёл — говорим, что случилось, а не крутим спиннер вечно
         window.setTimeout(() => {
           if (seq !== loadSeq.current || el.readyState >= 3 || !el.paused) return;
@@ -267,6 +328,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     [toast],
   );
 
+  // Долгая фоновая волна не должна копить в памяти всю историю очереди.
+  const trimQueue = useCallback(() => {
+    const { queue: q, index: i } = state.current;
+    if (i <= 200) return;
+    const drop = i - 100;
+    const dropped = new Set(q.slice(0, drop).map((x) => x.id));
+    const next = q.slice(drop);
+    state.current.queue = next;
+    state.current.index = i - drop;
+    original.current = original.current.filter((x) => !dropped.has(x.id));
+    setQueue(next);
+    setIndex(i - drop);
+  }, []);
+
   const goTo = useCallback(
     async (i: number, autoplay = true) => {
       const q = state.current.queue;
@@ -282,11 +357,13 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setIndex(i);
       state.current.index = i;
       const ok = await load(state.current.queue[i], autoplay);
+      if (ok && state.current.queue[i]) rememberPlayed(state.current.queue[i]);
+      if (ok) trimQueue();
       if (!ok && autoplay && skipRef.current && i + 1 < state.current.queue.length && state.current.index === i) {
         setTimeout(() => goTo(i + 1), 600); // пропускаем недоступный
       }
     },
-    [load],
+    [load, trimQueue],
   );
 
   const next = useCallback(() => {
@@ -296,6 +373,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     else {
       audio.current.pause();
       audio.current.currentTime = 0;
+      setPosition(0);
     }
   }, [goTo]);
 
@@ -314,6 +392,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       [
         "ended",
         () => {
+          const left = sleepTracksRef.current;
+          if (left != null) {
+            const nextLeft = left - 1;
+            if (nextLeft <= 0) {
+              sleepTracksRef.current = null;
+              setSleepTracks(null);
+              el.pause();
+              toast("Таймер сна: пауза");
+              return;
+            }
+            sleepTracksRef.current = nextLeft;
+            setSleepTracks(nextLeft);
+          }
           if (state.current.repeat === "one") {
             el.currentTime = 0;
             setPosition(0);
@@ -345,6 +436,19 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [next, toast, load]);
 
+  useEffect(() => {
+    if (!sleepAt) return;
+    const check = () => {
+      if (Date.now() < sleepAt) return;
+      audio.current.pause();
+      setSleepAt(null);
+      toast("Таймер сна: пауза");
+    };
+    check();
+    const id = window.setInterval(check, 500);
+    return () => clearInterval(id);
+  }, [sleepAt, toast]);
+
   useEffect(() => { audio.current.volume = volume * volMax; localStorage.setItem("melo.volume", JSON.stringify(volume)); }, [volume, volMax]);
   useEffect(() => localStorage.setItem("melo.shuffle", JSON.stringify(shuffle)), [shuffle]);
   useEffect(() => localStorage.setItem("melo.repeat", JSON.stringify(repeat)), [repeat]);
@@ -360,6 +464,9 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     attachEq(el);
     resumeEq();
     clearInterval(fadeTimer.current);
+    clearInterval(transitionTimer.current);
+    transitionResolve.current?.();
+    transitionResolve.current = null;
     const target = volRef.current;
     if (!settings.fade) {
       el.volume = target;
@@ -401,6 +508,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const prefix = JSON.stringify({ queue: queue.slice(from, from + 300), index: index - from }).slice(0, -1);
     let lastSaved = -1;
     const save = () => {
+      // Пока новый трек не загружен, currentTime принадлежит предыдущему —
+      // сохранять его как позицию нового нельзя.
+      const cur = state.current.queue[state.current.index];
+      if (!cur || loadedId.current !== cur.id) return;
       const pos = audio.current.currentTime;
       if (pos === lastSaved) return;
       try { localStorage.setItem(key, `${prefix},"position":${Number.isFinite(pos) ? pos : 0}}`); lastSaved = pos; }
@@ -433,8 +544,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         artwork: current.cover ? [{ src: current.cover, sizes: "135x135" }] : [],
       });
     }
-    ms.setActionHandler("play", toggle);
-    ms.setActionHandler("pause", toggle);
+    // toggle переключает состояние, поэтому «play» и «pause» должны проверять его,
+    // иначе команда play на играющем треке поставит паузу.
+    ms.setActionHandler("play", () => { if (audio.current.paused) toggle(); });
+    ms.setActionHandler("pause", () => { if (!audio.current.paused) toggle(); });
     ms.setActionHandler("nexttrack", next);
     ms.setActionHandler("previoustrack", prev);
   }, [current, toggle, next, prev]);
@@ -446,6 +559,21 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     state.current.queue = q;
     setQueue(q);
     goTo(i);
+  };
+
+  const seekTo = (target: number) => {
+    const t = Math.max(0, Math.min(Number.isFinite(target) ? target : 0, duration || target));
+    seekingRef.current = true;
+    seekTargetRef.current = t;
+    lastSeekAtRef.current = Date.now();
+    if (seekingTimeoutRef.current) clearTimeout(seekingTimeoutRef.current);
+    seekingTimeoutRef.current = setTimeout(() => { seekingRef.current = false; }, 2000);
+    setPosition(t);
+    try {
+      audio.current.currentTime = t;
+    } catch {
+      seekingRef.current = false;
+    }
   };
 
   const value = useMemo<PlayerState>(() => ({
@@ -469,19 +597,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     toggle,
     next,
     prev,
-    seek: (s) => {
-      const target = Math.max(0, Math.min(Number.isFinite(s) ? s : 0, duration || s));
-      seekingRef.current = true;
-      seekTargetRef.current = target;
-      lastSeekAtRef.current = Date.now();
-      if (seekingTimeoutRef.current) clearTimeout(seekingTimeoutRef.current);
-      seekingTimeoutRef.current = setTimeout(() => { seekingRef.current = false; }, 2000);
-      setPosition(target);
-      try {
-        audio.current.currentTime = target;
-      } catch {
-        seekingRef.current = false;
-      }
+    seek: seekTo,
+    seekBy: (delta) => {
+      const el = audio.current;
+      const base = Number.isFinite(el.currentTime) ? el.currentTime : clock.get();
+      seekTo(base + delta);
     },
     setVolume: setVolumeState,
     toggleShuffle: () => {
@@ -493,6 +613,20 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       state.current.queue = q;
       setQueue(q);
       setIndex(Math.max(0, i));
+    },
+    sleepAt,
+    sleepTracks,
+    setSleepTimer: (minutes) => {
+      setSleepTracks(null);
+      setSleepAt(minutes && minutes > 0 ? Date.now() + minutes * 60_000 : null);
+    },
+    setSleepAfterTracks: (tracks) => {
+      setSleepAt(null);
+      setSleepTracks(tracks && tracks > 0 ? tracks : null);
+    },
+    clearSleep: () => {
+      setSleepTracks(null);
+      setSleepAt(null);
     },
     cycleRepeat: () => setRepeat((r) => (r === "off" ? "all" : r === "all" ? "one" : "off")),
     playNext: (t) => {
@@ -509,6 +643,22 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       original.current = q;
       state.current.queue = q;
       setQueue(q);
+    },
+    moveInQueue: (from, to) => {
+      const { queue: q, index: cur } = state.current;
+      if (from <= cur || to <= cur || from >= q.length || to >= q.length || from === to) return;
+      const next = q.slice();
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      state.current.queue = next;
+      setQueue(next);
+    },
+    clearUpcoming: () => {
+      const { queue: q, index: cur } = state.current;
+      if (cur + 1 >= q.length) return;
+      const next = q.slice(0, cur + 1);
+      state.current.queue = next;
+      setQueue(next);
     },
     swapCurrent: (t) => {
       const i = state.current.index;
@@ -555,12 +705,17 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (!r?.queue?.length) return;
         const q: Track[] = r.queue;
         const i = Math.min(Math.max(0, r.index | 0), q.length - 1);
+        // Если включён shuffle, восстанавливаем очередь вперемешку, начиная с текущего трека,
+        // иначе после перезапуска с включённым shuffle музыка пойдёт по исходному порядку.
+        const start = shuffle ? 0 : i;
+        const ordered = shuffle ? shuffled(q, q[i]) : q;
         original.current = q;
-        state.current.queue = q;
-        state.current.index = i;
-        setQueue(q);
-        setIndex(i);
-        load(q[i], false).then(() => {
+        state.current.queue = ordered;
+        state.current.index = start;
+        setQueue(ordered);
+        setIndex(start);
+        load(ordered[start], false).then(() => {
+          rememberPlayed(ordered[start]);
           const el = audio.current;
           const pos = Number(r.position) || 0;
           const apply = () => { el.currentTime = pos; setPosition(pos); };
@@ -573,6 +728,12 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     },
     stop: () => {
       clearInterval(fadeTimer.current);
+      clearInterval(transitionTimer.current);
+      transitionResolve.current?.();
+      transitionResolve.current = null;
+      setSleepAt(null);
+      setSleepTracks(null);
+      sleepTracksRef.current = null;
       resumeKey.current = null;
       loadSeq.current++;
       hls.current?.destroy();
@@ -602,7 +763,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setQueue(q);
       if (i < state.current.index) { state.current.index--; setIndex(state.current.index); }
     },
-  }), [queue, index, current, playing, buffering, duration, volume, shuffle, repeat, toggle, next, prev, goTo, load, toast, settings.resume, clock]);
+  }), [queue, index, current, playing, buffering, duration, volume, shuffle, repeat, sleepAt, sleepTracks, toggle, next, prev, goTo, load, toast, settings.resume, clock]);
 
   useEffect(() => () => {
     loadSeq.current++;

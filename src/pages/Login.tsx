@@ -205,14 +205,10 @@ export function Login() {
         return;
       }
       if (r.state !== "accepted") {
-        setOtpError(`${t("ВК не принял код.")} (VK: ${JSON.stringify(r.raw)})`);
+        setOtpError(t("ВК не принял код."));
         return;
       }
-      // Код принят — ключ придёт при одной из следующих проверок
-      for (let i = 0; i < 15 && !done.current; i++) {
-        if (phaseRef.current !== "code") return; // основной опрос уже обработал результат
-        await new Promise((res) => setTimeout(res, 1000));
-      }
+      // Код принят — ключ придёт при одной из следующих проверок QR-статуса.
     } catch (err) {
       setOtpError(t(errorText(err)));
     } finally {

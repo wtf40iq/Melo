@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { FolderPlus, Pencil } from "lucide-react";
 import { useT } from "../store/settings";
+import { useFocusTrap } from "../useFocusTrap";
 
 /** Создание и изменение офлайн-плейлиста: название и описание. */
 export function OfflineDialog({ edit, title: t0 = "", description: d0 = "", onSave, onClose }: {
@@ -12,6 +13,7 @@ export function OfflineDialog({ edit, title: t0 = "", description: d0 = "", onSa
   onClose: () => void;
 }) {
   const t = useT();
+  const trap = useFocusTrap<HTMLDivElement>();
   const [title, setTitle] = useState(t0);
   const [desc, setDesc] = useState(d0);
   const [busy, setBusy] = useState(false);
@@ -27,7 +29,7 @@ export function OfflineDialog({ edit, title: t0 = "", description: d0 = "", onSa
   };
   return createPortal(
     <div className="upd-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="upd-card dialog-card off-dialog" role="dialog">
+      <div ref={trap} tabIndex={-1} className="upd-card dialog-card off-dialog" role="dialog" aria-modal="true">
         <span className="upd-icon">{edit ? <Pencil size={22} /> : <FolderPlus size={22} />}</span>
         <h3>{t(edit ? "Изменить офлайн-плейлист" : "Новый офлайн-плейлист")}</h3>
         <input className="dialog-input" autoFocus placeholder={t("Название")} value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === "Enter" && ok()} maxLength={80} />

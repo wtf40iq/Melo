@@ -14,14 +14,8 @@ export interface MusicApi {
   restore(): Promise<Profile | null>;
   /** Вход в окне ВК внутри приложения; fresh — заново выбрать аккаунт. */
   login(fresh?: boolean): Promise<Profile>;
-  /** Вход через браузер пользователя: ждём адрес с ключом в буфере обмена. */
-  browserLogin(): Promise<Profile>;
-  /** Вставленный вручную адрес страницы после «Разрешить». */
-  browserSubmit(text: string): Promise<number | null>;
   /** Вход по номеру/почте и паролю. Профиль приходит, когда state === "ok". */
   directLogin(p: DirectLoginParams): Promise<DirectAuth & { profile?: Profile }>;
-  browserReopen(): Promise<void>;
-  browserCancel(): Promise<void>;
   /** Новый QR-код для входа через приложение ВК. */
   qrStart(): Promise<QrCode>;
   /** Статус QR-кода; при "ok" вход выполнен. */
@@ -38,6 +32,8 @@ export interface MusicApi {
   popular(genreId?: number): Promise<Track[]>;
   /** Поиск треков (быстрый, отдельно от остального). */
   searchTracks(q: string): Promise<Track[]>;
+  /** Первая быстрая страница поиска, пока полная выдача догружается. */
+  searchTracksFast(q: string): Promise<Track[]>;
   /** Плейлисты и исполнители по запросу. */
   searchExtras(q: string): Promise<SearchExtras>;
   /** Точный поиск: исполнитель и название отдельно. */

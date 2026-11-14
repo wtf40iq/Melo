@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { FilePlus2, FolderOpen, ImagePlus, MoreHorizontal, Pencil, Play, Shuffle, Trash2 } from "lucide-react";
+import { FileDown, FilePlus2, FolderOpen, ImagePlus, MoreHorizontal, Pencil, Play, Shuffle, Trash2 } from "lucide-react";
+import { invoke } from "@tauri-apps/api/core";
+import { inTauri } from "../api";
 import { api } from "../api";
 import { Cover } from "../components/Cover";
 import { Dialog } from "../components/Dialog";
@@ -63,6 +65,29 @@ export function OfflinePlaylist({ id }: { id: string }) {
       setBusy(false);
     }
   };
+  const exportM3u = async () => {
+    if (!inTauri) return;
+    try {
+      const NL = String.fromCharCode(10);
+      const root = (await api.offlineRoot()).replace(/[\/]+$/, "");
+      const lines = ["#EXTM3U", ...list.map((tr) => {
+        const file = tr.id.slice(4 + id.length + 1);
+        return `#EXTINF:${tr.duration},${tr.artist} - ${tr.title}${NL}${root}/${id}/${file}`;
+      })];
+      if (await invoke<boolean>("save_text_file", { defaultName: `${pl?.title ?? id}.m3u`, content: lines.join(NL) })) ui.toast(t("Экспортировано"));
+    } catch (e) {
+      ui.toast(errorText(e));
+    }
+  };
+  const importM3u = async () => {
+    if (!inTauri) return;
+    try {
+      const n = await invoke<number>("offline_import_m3u", { id });
+      if (n) { ui.toast(t("Импортировано файлов: {n}", { n })); await reload(); }
+    } catch (e) {
+      ui.toast(errorText(e));
+    }
+  };
   const pickCover = async () => {
     try { if (await api.offlinePickCover(id)) await reload(); } catch (e) { ui.toast(errorText(e)); }
   };
@@ -90,6 +115,8 @@ export function OfflinePlaylist({ id }: { id: string }) {
                   <button onClick={() => { setMenu(false); api.offlineOpen(id).catch((e) => ui.toast(errorText(e))); }}><FolderOpen size={16} /> {t("Открыть папку")}</button>
                   <button onClick={() => { setMenu(false); setDialog("edit"); }}><Pencil size={16} /> {t("Изменить название и описание")}</button>
                   <button onClick={() => { setMenu(false); pickCover(); }}><ImagePlus size={16} /> {t("Сменить обложку")}</button>
+                  <button onClick={() => { setMenu(false); void exportM3u(); }}><FileDown size={16} /> {t("Экспорт M3U")}</button>
+                  <button onClick={() => { setMenu(false); void importM3u(); }}><FilePlus2 size={16} /> {t("Импорт M3U")}</button>
                   <button className="danger" onClick={() => { setMenu(false); setDialog("delete"); }}><Trash2 size={16} /> {t("Удалить плейлист")}</button>
                 </div>
               )}

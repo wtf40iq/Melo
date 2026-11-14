@@ -1,6 +1,6 @@
 export function Loading({ rows = 6 }: { rows?: number }) {
   return (
-    <div className="skeleton" aria-label="Загрузка">
+    <div className="skeleton" role="status" aria-busy="true">
       {Array.from({ length: rows }, (_, i) => (
         <div key={i} className="sk-row">
           <i className="sk-cover" />
