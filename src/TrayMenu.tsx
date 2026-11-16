@@ -44,13 +44,16 @@ export function TrayMenu() {
     };
   }, []);
 
-  const glass = cfg.glass && cfg.glass !== "off";
-  const bg: string = cfg.bgEffect || "none";
+  const oled = cfg.theme === "oled";
+  const glass = !oled && cfg.glass && cfg.glass !== "off";
+  // В OLED старые живые фоны и стекло отключены — как и в настройках главного окна.
+  const bg: string = oled ? "none" : cfg.bgEffect || "none";
   useEffect(() => {
     const root = document.documentElement;
     root.style.setProperty("--accent", cfg.live?.accent || cfg.accent || "#5E9FE8");
     root.style.setProperty("--on-accent", cfg.live?.onAccent || "#ffffff");
     root.style.setProperty("--glass-a", String(cfg.glassOpacity ?? 0.55));
+    root.dataset.theme = cfg.theme === "oled" ? "oled" : "dark";
     root.classList.toggle("tray-glass", !!glass);
   }, [cfg, glass]);
 

@@ -17,6 +17,7 @@ type MiniState = {
   duration: number;
   volume: number;
   style?: MiniStyle;
+  theme?: "dark" | "oled";
   accent?: string;
   accent2?: string;
   accent3?: string;
@@ -60,6 +61,7 @@ export function MiniPlayer() {
       if (!alive) return;
       setSt(e.payload);
       setMiniStyle(e.payload.style === "compact" ? "compact" : "full");
+      document.documentElement.dataset.theme = e.payload.theme === "oled" ? "oled" : "dark";
       const root = document.documentElement.style;
       if (e.payload.accent) root.setProperty("--accent", e.payload.accent);
       if (e.payload.accent2) root.setProperty("--accent-2", e.payload.accent2);
@@ -221,19 +223,21 @@ export function MiniPlayer() {
             />
           </div>
         </div>
-        <div className="mini-controls">
-          <button onClick={() => act("prev")} aria-label="Previous"><SkipBack size={16} fill="currentColor" /></button>
-          <button className="mini-play" onClick={() => act("toggle")} aria-label="Play">
-            {st.buffering && st.playing ? <Loader2 size={18} className="spin" /> : st.playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
-          </button>
-          <button onClick={() => act("next")} aria-label="Next"><SkipForward size={16} fill="currentColor" /></button>
-        </div>
-        <div className="mini-extra">
-          <button onClick={() => { const next = !pinned; setPinned(next); void invoke("mini_set_pinned", { value: next }); }} aria-label={pinned ? "Unpin" : "Pin"} className={pinned ? "on" : ""}>
-            {pinned ? <Pin size={14} /> : <PinOff size={14} />}
-          </button>
-          <button className="mini-open" onClick={() => { void invoke("tray_action", { action: "show" }); }} aria-label="Open Melo"><SquareArrowOutUpRight size={15} /></button>
-          <button onClick={() => { void invoke("mini_hide"); }} aria-label="Close"><X size={16} /></button>
+        <div className="mini-actions">
+          <div className="mini-controls">
+            <button onClick={() => act("prev")} aria-label="Previous"><SkipBack size={16} fill="currentColor" /></button>
+            <button className="mini-play" onClick={() => act("toggle")} aria-label="Play">
+              {st.buffering && st.playing ? <Loader2 size={18} className="spin" /> : st.playing ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+            </button>
+            <button onClick={() => act("next")} aria-label="Next"><SkipForward size={16} fill="currentColor" /></button>
+          </div>
+          <div className="mini-extra">
+            <button onClick={() => { const next = !pinned; setPinned(next); void invoke("mini_set_pinned", { value: next }); }} aria-label={pinned ? "Unpin" : "Pin"} className={pinned ? "on" : ""}>
+              {pinned ? <Pin size={14} /> : <PinOff size={14} />}
+            </button>
+            <button className="mini-open" onClick={() => { void invoke("tray_action", { action: "show" }); }} aria-label="Open Melo"><SquareArrowOutUpRight size={15} /></button>
+            <button onClick={() => { void invoke("mini_hide"); }} aria-label="Close"><X size={16} /></button>
+          </div>
         </div>
       </div>
       <button

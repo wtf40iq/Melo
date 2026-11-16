@@ -657,15 +657,23 @@ html.mini-mode { --bg: transparent; }
 .mini-player.compact .mini-controls button:not(.mini-play) { display: none; }
 .mini-player.compact .mini-extra .mini-open { display: none; }
 .mini-player.compact .mini-controls .mini-play { width: 28px; height: 28px; }
-.mini-player.compact .mini-extra button { width: 19px; height: 19px; }
 .mini-player.compact .mini-info b { font-size: 12px; text-align: center; }
+.mini-actions { display: flex; align-items: center; justify-content: center; gap: clamp(5px, 1.2vw, 10px); flex: 0 0 auto; align-self: center; }
 .mini-controls { display: flex; align-items: center; gap: clamp(1px, .6vw, 5px); flex: 0 0 auto; }
 .mini-controls button, .mini-extra button { display: grid; place-items: center; width: clamp(23px, min(6vw, 22vh), 46px); height: clamp(23px, min(6vw, 22vh), 46px); border-radius: 50%; color: var(--muted); }
-.mini-controls button:hover, .mini-extra button:hover { background: rgba(255,255,255,.09); color: var(--text); }
+.mini-controls button:not(.mini-play):hover,
+.mini-extra button:hover { background: transparent; color: var(--text); }
+.mini-controls .mini-play:hover { filter: brightness(1.08); }
 .mini-controls .mini-play { width: clamp(30px, min(8vw, 28vh), 58px); height: clamp(30px, min(8vw, 28vh), 58px); background: var(--accent); color: var(--on-accent); }
-.mini-extra { display: flex; flex-direction: column; gap: 0; flex: 0 0 auto; }
-.mini-extra button { width: clamp(18px, min(4.5vw, 18vh), 30px); height: clamp(18px, min(4.5vw, 18vh), 30px); aspect-ratio: 1; color: var(--faint); }
+.mini-extra { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 2px; flex: 0 0 auto; }
+.mini-extra button { width: clamp(18px, min(4.5vw, 18vh), 30px); height: clamp(18px, min(4.5vw, 18vh), 30px); aspect-ratio: 1; color: var(--faint); background: transparent; transition: color .15s; }
 .mini-extra button.on { color: var(--accent); }
+.mini-player.compact .mini-extra { flex-direction: row; gap: 4px; }
+.mini-player.compact .mini-extra button { width: 24px; height: 24px; flex: 0 0 24px; }
+.mini-player.compact .mini-extra svg { width: 15px; height: 15px; }
+.mini-player.compact .mini-actions { gap: 7px; }
+.mini-player.compact .mini-controls { align-self: center; }
+.mini-player.compact .mini-info { align-self: center; }
 
 /* Полноэкранные направляющие мини-плеера */
 html.guides-mode, html.guides-mode body, html.guides-mode #root { background: transparent !important; overflow: hidden; pointer-events: none; border: 0; }
@@ -715,8 +723,8 @@ html.guides-mode { --bg: transparent; }
 .now-full-progress { display: grid; grid-template-columns: 44px 1fr 44px; align-items: center; gap: 10px; margin-top: 12px; font-size: 12px; color: rgba(255,255,255,.55); font-variant-numeric: tabular-nums; }
 .now-full-progress .slider { width: 100%; }
 .now-full-controls { display: flex; align-items: center; justify-content: center; gap: clamp(8px, 1.4vw, 20px); margin-top: 4px; }
-.now-full-controls .icon-btn { width: 48px; height: 48px; color: rgba(255,255,255,.7); }
-.now-full-play { width: 76px; height: 76px; }
+.now-full-controls .icon-btn { flex: 0 0 48px; width: 48px; height: 48px; color: rgba(255,255,255,.7); }
+.now-full-play { flex: 0 0 76px; width: 76px; min-width: 76px; height: 76px; aspect-ratio: 1; }
 .now-full-tools { display: flex; align-items: center; justify-content: center; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
 .now-full-volume { width: 130px; margin-left: 8px; }
 .now-full-lyrics { align-self: stretch; max-height: 68vh; overflow-y: auto; padding: 30px 12px 30vh; display: flex; flex-direction: column; gap: 2px; mask-image: linear-gradient(transparent, #000 14%, #000 84%, transparent); user-select: text; }
@@ -1344,6 +1352,8 @@ html.glass .queue { background: rgba(24, 25, 32, .78) !important; backdrop-filte
 /* Окна-диалоги */
 .dialog-input { height: 42px; padding: 0 14px; border-radius: 10px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); color: var(--text); font: inherit; outline: none; }
 .dialog-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.dialog-textarea { width: 100%; min-height: 180px; height: auto; padding: 12px 14px; resize: vertical; white-space: pre; overflow: auto;
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace; font-size: 12px; line-height: 1.5; user-select: text; }
 .upd-icon.danger { background: rgba(233, 84, 84, .15); color: #ff7b7b; }
 .btn.danger { background: #e05252; color: #fff; }
 .btn.danger:hover { background: #ea6262; }
@@ -1786,3 +1796,165 @@ html.glass .wave { background: linear-gradient(135deg, rgba(22,25,37,.72), rgba(
 .visuals-paused *, .visuals-paused *::before, .visuals-paused *::after { animation-play-state: paused !important; }
 /* Avoid staggered reveal delays on navigation; keep the short page transition. */
 .page-anim .page > * { animation-delay: 0ms !important; }
+
+/* ================= OLED: настоящий чёрный ================= */
+:root[data-theme="oled"] {
+  --bg: #000;
+  --surface: #000;
+  --raised: #0a0a0a;
+  --hover: #141414;
+  --border: rgba(255, 255, 255, 0.1);
+}
+:root[data-theme="oled"] body,
+:root[data-theme="oled"] .app,
+:root[data-theme="oled"] .titlebar,
+:root[data-theme="oled"] .sidebar,
+:root[data-theme="oled"] .player,
+:root[data-theme="oled"] .main,
+:root[data-theme="oled"] .set-main,
+:root[data-theme="oled"] .settings .set-scroll { background: #000; }
+:root[data-theme="oled"] .main { border: 1px solid rgba(255, 255, 255, 0.06); }
+:root[data-theme="oled"] .search,
+:root[data-theme="oled"] .search:focus-within { background: #0a0a0a; }
+:root[data-theme="oled"] .search { border: 1px solid rgba(255, 255, 255, 0.07); }
+:root[data-theme="oled"] .nav-item:hover,
+:root[data-theme="oled"] .nav-item.active,
+:root[data-theme="oled"] .side-now,
+:root[data-theme="oled"] .card:hover,
+:root[data-theme="oled"] .tl-row:hover,
+:root[data-theme="oled"] .q-row:hover { background: #0f0f0f; }
+:root[data-theme="oled"] .side-now { border: 1px solid rgba(255, 255, 255, 0.07); }
+
+:root[data-theme="oled"] .set-card,
+:root[data-theme="oled"] .set-nav,
+:root[data-theme="oled"] .acc-item,
+:root[data-theme="oled"] .set-tile,
+:root[data-theme="oled"] .btn.secondary,
+:root[data-theme="oled"] .segmented,
+:root[data-theme="oled"] .chip,
+:root[data-theme="oled"] .tab-count,
+:root[data-theme="oled"] .accent-cover,
+:root[data-theme="oled"] .renew-pill,
+:root[data-theme="oled"] .deep-banner,
+:root[data-theme="oled"] .deep-field { background: #080808; border-color: rgba(255, 255, 255, 0.09); }
+:root[data-theme="oled"] .set-card,
+:root[data-theme="oled"] .set-nav { background: #000; border-color: rgba(255, 255, 255, 0.08); }
+:root[data-theme="oled"] .set-tile:hover,
+:root[data-theme="oled"] .set-nav-btn:hover,
+:root[data-theme="oled"] .btn.secondary:hover,
+:root[data-theme="oled"] .chip:hover,
+:root[data-theme="oled"] .accent-cover:hover { background: #151515; }
+:root[data-theme="oled"] .set-tile.on { background: color-mix(in srgb, var(--accent) 9%, #000); }
+:root[data-theme="oled"] .set-nav-ico { background: #111; }
+:root[data-theme="oled"] .set-tile-art {
+  background: radial-gradient(circle at 30% 20%, rgba(255,255,255,.06), transparent 60%), #070707;
+}
+:root[data-theme="oled"] .settings .set-head-icon { background: color-mix(in srgb, var(--accent) 10%, #000); }
+
+:root[data-theme="oled"] .hero {
+  background: radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 58%), #000 !important;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+:root[data-theme="oled"] .hero::after {
+  background: linear-gradient(180deg, rgba(255,255,255,.05), transparent 40%);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
+}
+:root[data-theme="oled"] .hero-glow { opacity: .28; filter: blur(38px) saturate(1.05); }
+:root[data-theme="oled"] .wave {
+  background: #000;
+  border-color: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 24px 60px -34px rgba(0,0,0,.9);
+}
+:root[data-theme="oled"] .wave::after {
+  background: linear-gradient(90deg, rgba(0,0,0,.94) 0%, rgba(0,0,0,.64) 48%, transparent 84%);
+}
+:root[data-theme="oled"] .wave-aura i { opacity: .24; }
+
+:root[data-theme="oled"] .menu,
+:root[data-theme="oled"] .queue,
+:root[data-theme="oled"] .search-history,
+:root[data-theme="oled"] .color-pop,
+:root[data-theme="oled"] .eq-pop,
+:root[data-theme="oled"] .vol-pop,
+:root[data-theme="oled"] .sleep-pop,
+:root[data-theme="oled"] .upd-card,
+:root[data-theme="oled"] .login-card,
+:root[data-theme="oled"] .drop-zone > div {
+  background: #050505 !important;
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: 0 18px 50px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.06);
+}
+:root[data-theme="oled"] .menu button:hover,
+:root[data-theme="oled"] .acc-row:hover,
+:root[data-theme="oled"] .q-row:hover { background: #151515; }
+:root[data-theme="oled"] .dialog-input,
+:root[data-theme="oled"] .upd-notes { background: #0a0a0a; border-color: rgba(255,255,255,.11); }
+:root[data-theme="oled"] .upd-bar { background: #1a1a1a; }
+:root[data-theme="oled"] .toast { background: #101010; color: #fff; border: 1px solid rgba(255,255,255,.12); }
+:root[data-theme="oled"] .toast-action { background: var(--accent); color: var(--on-accent, #000); }
+:root[data-theme="oled"] .now-full {
+  background: radial-gradient(90% 90% at 70% 10%, color-mix(in srgb, var(--accent) 18%, #000), #000 70%);
+}
+:root[data-theme="oled"] .now-full::after {
+  background: linear-gradient(90deg, rgba(0,0,0,.55), transparent 35%, transparent 70%, rgba(0,0,0,.4)), linear-gradient(0deg, rgba(0,0,0,.7), transparent 45%);
+}
+
+/* Мини-плеер и меню трея тоже уважают OLED */
+:root[data-theme="oled"] .mini-body {
+  background: #050505;
+  border: 1px solid rgba(255,255,255,.1);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+}
+:root[data-theme="oled"] .tray-card {
+  background: #050505;
+  border-color: rgba(255,255,255,.1);
+  box-shadow: 0 12px 30px rgba(0,0,0,.7), inset 0 1px 0 rgba(255,255,255,.06);
+}
+
+/* OLED + живой фон: чёрные панели становятся полупрозрачными, фон снова виден. */
+html[data-theme="oled"].fx-bg .app { background: transparent; }
+html[data-theme="oled"].fx-bg .titlebar { background: transparent; }
+html[data-theme="oled"].fx-bg .main {
+  background:
+    linear-gradient(160deg, rgba(255,255,255,.035), transparent 45%),
+    rgba(0, 0, 0, .12);
+  /* Иначе базовый html.fx-bg .main размывает звёзды и созвездия. */
+  backdrop-filter: none;
+}
+html[data-theme="oled"].fx-bg .sidebar,
+html[data-theme="oled"].fx-bg .player {
+  background: rgba(0, 0, 0, .2);
+}
+/* Космос должен проглядывать и сквозь большие карточки, а не только в заголовке. */
+html[data-theme="oled"].fx-bg .hero {
+  background:
+    radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 58%),
+    rgba(0, 0, 0, .14) !important;
+}
+html[data-theme="oled"].fx-bg .wave {
+  background: rgba(0, 0, 0, .16);
+}
+html[data-theme="oled"].fx-bg .wave::after {
+  background: linear-gradient(90deg, rgba(8, 8, 14, .58) 0%, rgba(8, 8, 14, .28) 48%, transparent 82%);
+}
+html[data-theme="oled"].fx-bg .set-card,
+html[data-theme="oled"].fx-bg .side-now {
+  background: rgba(0, 0, 0, .42);
+}
+html[data-theme="oled"].fx-bg .settings .set-main,
+html[data-theme="oled"].fx-bg .settings .set-scroll { background: transparent; }
+
+/* ================= OLED: «Космос» ================= */
+.fx-space {
+  position: absolute; inset: 0; overflow: hidden; pointer-events: none;
+  background: #000;
+}
+.fx-space canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.fx-space-vignette {
+  position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(ellipse at 50% 44%, transparent 38%, rgba(0, 0, 0, .2) 74%, rgba(0, 0, 0, .62) 100%);
+}
+
+/* Недоступные в OLED настройки */
+.segmented.disabled { position: relative; opacity: .48; cursor: not-allowed; }
+.segmented.disabled button { cursor: not-allowed; }

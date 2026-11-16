@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from "react";
-import { AppWindow, Image as ImageIcon, Info, Music2, Palette, UserRound, WandSparkles, type LucideIcon, Check, Copy, FileText, RefreshCw, Sparkles, LogOut, RotateCcw, UserPlus, X } from "lucide-react";
+import { AppWindow, Image as ImageIcon, Info, Music2, Palette, UserRound, WandSparkles, type LucideIcon, Check, Copy, FileText, Loader2, RefreshCw, Sparkles, LogOut, RotateCcw, UserPlus, X } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { api, inTauri } from "../api";
 import { AppInfo } from "../api/types";
@@ -24,12 +24,12 @@ function Toggle({ checked, onChange, label }: { checked: boolean; onChange: (v: 
   );
 }
 
-function Seg<T extends string>({ value, onChange, options }: { value: T; onChange: (v: T) => void; options: readonly (readonly [T, string])[] }) {
+function Seg<T extends string>({ value, onChange, options, disabled, title }: { value: T; onChange: (v: T) => void; options: readonly (readonly [T, string])[]; disabled?: boolean; title?: string }) {
   const t = useSettings().t;
   return (
-    <div className="segmented">
+    <div className={`segmented ${disabled ? "disabled" : ""}`} data-tip={disabled ? title : undefined} aria-disabled={disabled || undefined}>
       {options.map(([v, label]) => (
-        <button key={v} className={value === v ? "active" : ""} onClick={() => onChange(v)}>
+        <button key={v} className={value === v ? "active" : ""} disabled={disabled} onClick={() => onChange(v)}>
           {t(label)}
         </button>
       ))}
@@ -104,21 +104,31 @@ export const Settings = memo(function Settings() {
   const upd = useUpdate();
   const [doc, setDoc] = useState<"terms" | "privacy" | null>(null);
   const [confirmOut, setConfirmOut] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [tab, setTabState] = useState<TabId>(() => (sessionStorage.getItem("melo.setTab") as TabId) || "play");
   const setTab = (v: TabId) => { setTabState(v); sessionStorage.setItem("melo.setTab", v); document.querySelector(".set-scroll")?.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior }); };
   const t = s.t;
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [autostart, setAutostart] = useState(false);
   const [session, setSession] = useState<SessionInfo | null>(null);
-  const refreshSession = () => {
+  const [diagBusy, setDiagBusy] = useState(false);
+  const refreshSession = async (notify = false) => {
     if (!inTauri) return;
-    invoke<SessionInfo>("vk_session_info").then(setSession).catch(() => {});
+    setDiagBusy(true);
+    try {
+      setSession(await invoke<SessionInfo>("vk_session_info"));
+      if (notify) ui.toast(t("Диагностика обновлена"));
+    } catch (e) {
+      if (notify) ui.toast(String(e));
+    } finally {
+      setDiagBusy(false);
+    }
   };
   useEffect(() => {
     api.info().then(setInfo).catch(() => {});
     lib.reloadAccounts();
     if (inTauri) invoke<boolean>("autostart_get").then(setAutostart).catch(() => {});
-    refreshSession();
+    void refreshSession();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const toggleAutostart = async (v: boolean) => {
@@ -135,18 +145,19 @@ export const Settings = memo(function Settings() {
     ui.toast("Скопировано");
   };
   const copySettings = () => copy(JSON.stringify(s, (_, v) => (typeof v === "function" ? undefined : v), 2));
-  const importSettings = async () => {
+  const importSettings = (text: string): boolean => {
     try {
-      const text = await navigator.clipboard.readText();
       const data = JSON.parse(text);
-      if (!data || typeof data !== "object") throw new Error("В буфере нет настроек Melo");
+      if (!data || typeof data !== "object") throw new Error(t("В буфере нет настроек Melo"));
       const patch: Record<string, unknown> = {};
       for (const k of Object.keys(DEFAULT_SETTINGS)) if (k in data) patch[k] = data[k];
-      if (!Object.keys(patch).length) throw new Error("В буфере нет настроек Melo");
+      if (!Object.keys(patch).length) throw new Error(t("В буфере нет настроек Melo"));
       s.set(patch);
       ui.toast(t("Настройки загружены"));
+      return true;
     } catch (e) {
       ui.toast(String(e instanceof Error ? e.message : e));
+      return false;
     }
   };
   const copyDiagnostics = async () => {
@@ -391,9 +402,15 @@ export const Settings = memo(function Settings() {
           </div>
         )}
         <Row title="Прозрачное окно (стекло)" hint={s.glass === "acrylic" ? "Акрил — матовое стекло. На некоторых ПК окно может тормозить при перетаскивании" : "Слюда — оттенок обоев (Windows 11), Акрил — матовое стекло"}>
-          <Seg value={s.glass} onChange={(v) => s.set({ glass: v })} options={[["off", "Выкл."], ["mica", "Слюда"], ["tabbed", "Слюда+"], ["acrylic", "Акрил"]]} />
+          <Seg
+            value={s.theme === "oled" ? "off" : s.glass}
+            onChange={(v) => s.set({ glass: v })}
+            options={[["off", "Выкл."], ["mica", "Слюда"], ["tabbed", "Слюда+"], ["acrylic", "Акрил"]]}
+            disabled={s.theme === "oled"}
+            title={t("Поменяйте тему на тёмную")}
+          />
         </Row>
-        {s.glass !== "off" && (
+        {s.theme !== "oled" && s.glass !== "off" && (
           <Row title="Плотность стекла">
             <input
               type="range" aria-label={t("Прозрачность")} className="slider set-slider" min={0.15} max={0.9} step={0.05} value={s.glassOpacity}
@@ -403,8 +420,19 @@ export const Settings = memo(function Settings() {
           </Row>
         )}
         <Row title="Живой фон" hint="Эффект за панелями приложения">
-          <Seg value={s.bgEffect} onChange={(v) => s.set({ bgEffect: v })} options={[["none", "Нет"], ["aurora", "Аврора"], ["cover", "Обложка"], ["stars", "Звёзды"], ["grain", "Плёнка"]]} />
+          <Seg
+            value={s.theme === "oled" ? "none" : s.bgEffect}
+            onChange={(v) => s.set({ bgEffect: v })}
+            options={[["none", "Нет"], ["aurora", "Аврора"], ["cover", "Обложка"], ["stars", "Звёзды"], ["grain", "Плёнка"]]}
+            disabled={s.theme === "oled"}
+            title={t("Поменяйте тему на тёмную")}
+          />
         </Row>
+        {s.theme === "oled" && (
+          <Row title="Живой фон OLED" hint="Космос — звёзды, туманности и падающие звёзды">
+            <Seg value={s.oledBg} onChange={(v) => s.set({ oledBg: v })} options={[["none", "Нет"], ["space", "Космос"]]} />
+          </Row>
+        )}
             </section>
 
             <section className="set-card">
@@ -552,8 +580,10 @@ export const Settings = memo(function Settings() {
         </div>
         <div className="row-gap settings-tools">
           <button className="btn secondary sm-btn" onClick={copySettings}><Copy size={15} /> {t("Скопировать настройки")}</button>
-          <button className="btn secondary sm-btn" onClick={() => { void importSettings(); }}><FileText size={15} /> {t("Вставить настройки")}</button>
-          <button className="btn secondary sm-btn" onClick={() => { refreshSession(); }}><RefreshCw size={15} /> {t("Обновить диагностику")}</button>
+          <button className="btn secondary sm-btn" onClick={() => setImportOpen(true)}><FileText size={15} /> {t("Вставить настройки")}</button>
+          <button className="btn secondary sm-btn" disabled={diagBusy} onClick={() => { void refreshSession(true); }}>
+            {diagBusy ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />} {t("Обновить диагностику")}
+          </button>
           <button className="btn secondary sm-btn" onClick={() => { void copyDiagnostics(); }}><Info size={15} /> {t("Скопировать диагностику")}</button>
         </div>
               <small className="faint">
@@ -573,6 +603,19 @@ export const Settings = memo(function Settings() {
           onConfirm={async () => { setConfirmOut(false); await lib.logout(); }} />
       )}
       {doc && <LegalDialog doc={doc} onClose={() => setDoc(null)} />}
+      {importOpen && (
+        <Dialog
+          title="Вставить настройки"
+          text={t("Вставьте JSON настроек в поле ниже. Буфер обмена не читается автоматически.")}
+          icon={<FileText size={22} />}
+          input=""
+          textarea
+          rows={10}
+          confirm="Загрузить"
+          onClose={() => setImportOpen(false)}
+          onConfirm={(text) => { if (importSettings(text)) setImportOpen(false); }}
+        />
+      )}
     </div>
   );
 });

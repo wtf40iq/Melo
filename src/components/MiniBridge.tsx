@@ -14,6 +14,8 @@ export function MiniBridge() {
   live.current = p;
   const styleRef = useRef(settings.miniStyle);
   styleRef.current = settings.miniStyle;
+  const themeRef = useRef(settings.theme);
+  themeRef.current = settings.theme;
 
   useEffect(() => {
     // Даже если мини-плеер закрыт, запоминаем выбранный вид для следующего открытия.
@@ -38,6 +40,7 @@ export function MiniBridge() {
         duration: pl.duration,
         volume: pl.volume,
         style: styleRef.current,
+        theme: themeRef.current,
         accent: root.getPropertyValue("--accent").trim() || undefined,
         accent2: root.getPropertyValue("--accent-2").trim() || undefined,
         accent3: root.getPropertyValue("--accent-3").trim() || undefined,

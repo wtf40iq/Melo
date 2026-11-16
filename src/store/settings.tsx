@@ -65,6 +65,8 @@ type Settings = {
   heroBeat: boolean;
   /** Живой фон за интерфейсом */
   bgEffect: "none" | "aurora" | "cover" | "stars" | "grain";
+  /** Отдельный фон для OLED: старые эффекты в OLED отключены. */
+  oledBg: "none" | "space";
   /** Прозрачность окна: системное стекло Windows под интерфейсом */
   glass: "off" | "acrylic" | "mica" | "tabbed";
   /** Насколько плотные панели в режиме стекла, 0.2–0.9 */
@@ -131,6 +133,7 @@ const defaults: Settings = {
   fireSize: 1,
   heroBeat: true,
   bgEffect: "stars",
+  oledBg: "space",
   glass: "off",
   glassOpacity: 0.55,
   dynamicAccent: false,
@@ -175,6 +178,7 @@ const load = (): Settings => {
       delete saved.fireCursor;
     }
     saved.waveSize = Math.max(0.2, Math.min(3, Number(saved.waveSize) || 1));
+    if (saved.oledBg !== "none" && saved.oledBg !== "space") delete saved.oledBg;
     if (saved.theme !== "oled") saved.theme = "dark";
     if (saved.miniStyle !== "compact") saved.miniStyle = "full";
     return { ...defaults, ...saved, v: 4 };

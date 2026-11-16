@@ -5,6 +5,7 @@ import { usePlayer } from "../store/player";
 import { useSettings } from "../store/settings";
 import { useUi } from "../store/ui";
 import { Stars } from "./Stars";
+import { Space } from "./Space";
 import { FireCursor } from "./FireCursor";
 import { onVisualActivity, visualsActive } from "../visualActivity";
 
@@ -124,6 +125,10 @@ export function Effects() {
   const [pulse, setPulse] = useState(0);
   const firstPulse = useRef(true);
   const cover = p.current?.cover;
+  // В OLED старые «живые фоны» и стекло недоступны: у него свой космический фон.
+  const oled = s.theme === "oled";
+  const activeGlass = oled ? "off" : s.glass;
+  const activeBg = oled ? (s.oledBg === "space" ? "space" : "none") : s.bgEffect;
 
   // Переход между вкладками подталкивает живой фон: звёзды ускоряются,
   // а поверх остальных фонов проходит мягкая волна света.
@@ -137,12 +142,12 @@ export function Effects() {
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.theme = s.theme;
-    root.classList.toggle("glass", s.glass !== "off");
-    root.classList.toggle("fx-bg", s.bgEffect !== "none" || s.glass !== "off");
+    root.classList.toggle("glass", activeGlass !== "off");
+    root.classList.toggle("fx-bg", activeBg !== "none" || activeGlass !== "off");
     root.classList.toggle("vinyl", s.vinyl);
     root.dataset.radius = s.radius;
     root.style.setProperty("--glass-a", String(s.glassOpacity));
-  }, [s.theme, s.glass, s.bgEffect, s.vinyl, s.radius, s.glassOpacity]);
+  }, [s.theme, s.glass, s.bgEffect, s.oledBg, s.vinyl, s.radius, s.glassOpacity, activeGlass, activeBg]);
 
   // Масштаб интерфейса — встроенным зумом окна, чтобы координаты мыши не ломались
   useEffect(() => {
@@ -159,16 +164,16 @@ export function Effects() {
   // Системное стекло Windows
   useEffect(() => {
     if (!inTauri) return;
-    invoke("set_window_effect", { kind: s.glass === "off" ? "none" : s.glass }).catch(() => {});
-  }, [s.glass]);
+    invoke("set_window_effect", { kind: activeGlass === "off" ? "none" : activeGlass }).catch(() => {});
+  }, [activeGlass]);
 
   // Цвет из обложки — для акцента и фона «Обложка»
   useEffect(() => {
     let alive = true;
-    if (!cover || (!s.dynamicAccent && s.bgEffect !== "cover")) return setCoverColor(null);
+    if (!cover || (!s.dynamicAccent && activeBg !== "cover")) return setCoverColor(null);
     dominantColor(cover).then((c) => alive && setCoverColor(c)).catch(() => { if (alive) setCoverColor(null); });
     return () => { alive = false; };
-  }, [cover, s.dynamicAccent, s.bgEffect]);
+  }, [cover, s.dynamicAccent, activeBg]);
 
   useEffect(() => {
     const root = document.documentElement.style;
@@ -302,15 +307,16 @@ export function Effects() {
 
   return (
     <>
-      {s.bgEffect !== "none" && (
-        <div className={`fx-bg-layer fx-${s.bgEffect}`} aria-hidden>
-          {s.bgEffect === "aurora" && <><i /><i /><i /><i /></>}
-          {s.bgEffect === "cover" && cover && (
+      {activeBg !== "none" && (
+        <div className={`fx-bg-layer fx-${activeBg}`} aria-hidden>
+          {activeBg === "space" && <Space />}
+          {activeBg === "aurora" && <><i /><i /><i /><i /></>}
+          {activeBg === "cover" && cover && (
             <div key={cover} className="fx-cover" style={{ backgroundImage: cssUrl(cover), ["--cc" as string]: coverColor ?? "var(--accent)" }} />
           )}
-          {s.bgEffect === "stars" && <Stars />}
-          {pulse > 0 && s.bgEffect !== "stars" && (
-            <div key={pulse} className={`fx-kick fx-kick-${s.bgEffect}`} />
+          {activeBg === "stars" && <Stars />}
+          {pulse > 0 && activeBg !== "stars" && activeBg !== "space" && (
+            <div key={pulse} className={`fx-kick fx-kick-${activeBg}`} />
           )}
         </div>
       )}

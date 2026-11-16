@@ -1,4 +1,6 @@
 import { Trash2 } from "lucide-react";
+import { useState } from "react";
+import { Dialog } from "../components/Dialog";
 import { Empty } from "../components/Loading";
 import { TrackList } from "../components/TrackList";
 import { clearPlayed, usePlayed } from "../store/played";
@@ -9,6 +11,7 @@ export function History() {
   const played = usePlayed();
   const t = useT();
   const ui = useUi();
+  const [confirmClear, setConfirmClear] = useState(false);
   const tracks = played.map((x) => x.track);
 
   return (
@@ -18,7 +21,7 @@ export function History() {
         {tracks.length > 0 && (
           <button
             className="btn secondary"
-            onClick={() => { clearPlayed(); ui.toast(t("История очищена")); }}
+            onClick={() => setConfirmClear(true)}
           >
             <Trash2 size={16} /> {t("Очистить историю")}
           </button>
@@ -31,6 +34,17 @@ export function History() {
       {tracks.length
         ? <TrackList tracks={tracks} />
         : <Empty title={t("История пока пуста")} text={t("Включите музыку — она появится здесь")} />}
+      {confirmClear && (
+        <Dialog
+          title="Очистить историю?"
+          text={t("Вся история прослушивания на этом компьютере будет удалена.")}
+          icon={<Trash2 size={22} />}
+          confirm="Очистить"
+          danger
+          onClose={() => setConfirmClear(false)}
+          onConfirm={() => { clearPlayed(); setConfirmClear(false); ui.toast(t("История очищена")); }}
+        />
+      )}
     </div>
   );
 }

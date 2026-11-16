@@ -2229,7 +2229,7 @@ dependencies = [
 
 [[package]]
 name = "melo"
-version = "0.9.11"
+version = "0.9.12"
 dependencies = [
  "cookie_store 0.21.1",
  "lofty",
